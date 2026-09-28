@@ -13,6 +13,7 @@
     "index.js",
     "client.js",
     "lib",
+    "assets",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -45,6 +46,9 @@
   ],
   "author": "ffyfox",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ffyfox/dsh-prompt-hardener.git"

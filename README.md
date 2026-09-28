@@ -1,6 +1,7 @@
 # 硬邦邦提示词优化 · dsh-prompt-hardener
 
 ![test](https://github.com/ffyfox/dsh-prompt-hardener/actions/workflows/test.yml/badge.svg)
+[![npm](https://img.shields.io/npm/v/dsh-prompt-hardener)](https://www.npmjs.com/package/dsh-prompt-hardener)
 
 一个 [DSH](https://github.com/deepseek-ai) 插件：**你按下回车之前，需求先被改写成肌肉集团下的军令状。**
 
@@ -19,26 +20,28 @@
 
 ## 安装
 
-### 桌面版（DeepSeek Harness 应用）
+### 桌面版
 
 在桌面端界面里：
 
 1. 点击左栏 **插件**。
 2. 点右上角的 **「添加插件」**。
-3. 在弹出的对话框里，往 **「包名或地址」** 这一栏粘贴仓库地址：
+3. 在弹出的对话框里，往 **「包名或地址」** 这一栏粘贴 npm 包名：
 
    ```
-   https://github.com/ffyfox/dsh-prompt-hardener
+   dsh-prompt-hardener
    ```
 
-   ⚠️ 本插件**暂未发布到 npm**。
+   填仓库地址 `https://github.com/ffyfox/dsh-prompt-hardener` 也认，那条路走 git、拉的是最新源码。
 4. 点 **「安装」**，启用插件并重启DSH。
 
 ### 命令行版（`dsh web` 这类自管 profile）
 
 ```bash
-dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
+dsh plugin --profile web add dsh-prompt-hardener
 ```
+
+想装仓库里的最新源码，就换成 `github:ffyfox/dsh-prompt-hardener`。
 
 ## 使用
 
@@ -62,7 +65,7 @@ dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
 
 ## 卸载
 
-界面里：**设置 → 插件** → 找到 `dsh-prompt-hardener` → **卸载** → 重启应用。
+桌面版：**设置 → 插件** → 找到 `dsh-prompt-hardener` → **卸载** → 重启应用。
 
 命令行版：
 
@@ -70,7 +73,7 @@ dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
 dsh plugin --profile web remove dsh-prompt-hardener
 ```
 
-## 它干了什么
+## 功能
 
 只干一件事：在 `agent/pre-step` 拦下**你亲手打的那条消息**，交给模型按提示词**全量重写**，
 落库的就是改写后的文本。
