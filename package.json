@@ -13,7 +13,6 @@
     "index.js",
     "client.js",
     "lib",
-    "assets",
     "cordis.patch.yml",
     "README.md"
   ],
