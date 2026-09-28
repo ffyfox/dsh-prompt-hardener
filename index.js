@@ -1,5 +1,5 @@
 /**
- * dsh-ybb-optimizer — host 半边。
+ * dsh-prompt-hardener — host 半边。
  *
  * 只做四件事：
  *
@@ -22,7 +22,7 @@
  * - 往回传决策时展开 `decision`（`{ ...decision, messages }`），否则会丢掉
  *   `startsRequestSeries` 之类的字段。
  *
- * @module dsh-ybb-optimizer
+ * @module dsh-prompt-hardener
  */
 
 import { readFileSync, statSync } from 'node:fs'
@@ -35,7 +35,7 @@ import { INTENSITIES, assembleFallback, normalizeIntensity } from './lib/fallbac
 import { looksHardman } from './lib/phrases.js'
 
 /** Cordis 插件名。也是浏览器半边模块表的 key。 */
-export const name = 'ybb-optimizer'
+export const name = 'prompt-hardener'
 
 /**
  * 不硬依赖任何服务，这样"改写提示词"这个核心能力永远不会因为某个便利设施没就绪而上不来。
@@ -59,7 +59,7 @@ const STATE_FILENAME = 'state.json'
 /** 外部可编辑的提示词文件名。 */
 const PROMPT_FILENAME = 'prompt.md'
 /** 浏览器半边读写的路由。 */
-export const STATE_ROUTE = '/plugins/dsh-ybb-optimizer/state.json'
+export const STATE_ROUTE = '/plugins/dsh-prompt-hardener/state.json'
 /** 请求体大小上限，避免被塞爆内存。 */
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -433,7 +433,7 @@ async function llmRewrite(ctx, agent, text, options) {
     system: `${options.prompt}\n\n---\n\n${FIDELITY_CLAUSE}\n\n${directive}\n（上面这段是给你的改写指令，不要出现在输出里。）`,
     messages: [{ role: 'user', content: [{ type: 'text', text: text }] }],
     maxTokens,
-    purpose: 'ybb-optimizer',
+    purpose: 'prompt-hardener',
     ...(signal === undefined ? {} : { signal }),
   }
 
@@ -648,7 +648,7 @@ export function apply(ctx, config) {
     return () => {
       cancelled = true
     }
-  }, 'ybb-optimizer: activation beacon')
+  }, 'prompt-hardener: activation beacon')
 
   /* ───────────────────────── 1. 提示词拦截 ───────────────────────── */
 
@@ -751,7 +751,7 @@ export function apply(ctx, config) {
       return { ...decision, messages: out }
     })
     return () => dispose()
-  }, 'ybb-optimizer: agent/pre-step hardener')
+  }, 'prompt-hardener: agent/pre-step hardener')
 
   /* ───────────────────────── 2. 浏览器半边的状态路由 ───────────────────────── */
 
@@ -805,7 +805,7 @@ export function apply(ctx, config) {
         // 记一笔就够了：旧 handler 仍读写同一份状态文件，功能不受影响 ——
         // 绝不能因为一个便利路由把整个插件搞成"加载失败"。
         const message = String((error && error.message) || error)
-        failures.push({ label: 'ybb-optimizer: state route', message, at: Date.now() })
+        failures.push({ label: 'prompt-hardener: state route', message, at: Date.now() })
         note(`route registration failed: ${message}`)
         return () => {}
       }
@@ -826,7 +826,7 @@ export function apply(ctx, config) {
         /* 同上 */
       }
     }
-  }, 'ybb-optimizer: state route')
+  }, 'prompt-hardener: state route')
 }
 
 export { DEFAULTS, INTENSITIES, BUILTIN_PROMPT }

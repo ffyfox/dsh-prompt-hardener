@@ -78,7 +78,7 @@ await import('../client.js')
 
 test('用包名注册 lazy factory', () => {
   assert.ok(registered, '客户端产物没有调用 __ModuleLoader__.load')
-  assert.equal(registered.id, 'dsh-ybb-optimizer')
+  assert.equal(registered.id, 'dsh-prompt-hardener')
   assert.equal(typeof registered.factory, 'function')
 })
 
@@ -90,7 +90,7 @@ test('factory 只 require("react")，并导出 name/inject/apply', () => {
     throw new Error(`unexpected require: ${id}`)
   })
   assert.deepEqual(requested, ['react'], '除 react 外不得加载任何模块')
-  assert.equal(module.name, 'dsh-ybb-optimizer')
+  assert.equal(module.name, 'dsh-prompt-hardener')
   assert.deepEqual(module.inject, ['slots', 'locale'])
   assert.equal(typeof module.apply, 'function')
 })
@@ -131,12 +131,12 @@ test('apply 注册语言域、样式表与输入框控件', () => {
 
   module.apply(ctx)
 
-  assert.ok(calls.locale.includes('ybb-optimizer'))
+  assert.ok(calls.locale.includes('prompt-hardener'))
   assert.ok(calls.inject.includes('conversation.input.left'))
   assert.equal(calls.slots.length, 1)
   const entry = calls.slots[0]
   assert.equal(entry.options.name, 'conversation.input.left')
-  assert.equal(entry.options.id, 'ybb-optimizer')
+  assert.equal(entry.options.id, 'prompt-hardener')
   assert.equal(typeof entry.options.order, 'number')
 
   // 组件必须能渲染而不抛：抛了会把 slot entry 打空。
@@ -229,6 +229,6 @@ test('展开面板：新标题、新标签、且一个字的多余统计都不�
   // 说明已定为单行，pre-line 随之下线。
   // 记着这个坑：哪天要把说明改回多行，字符串里光写 \n 不够，必须同时把
   // `white-space: pre-line` 加回 .ybb-hint —— 否则 HTML 会把换行折成空格，改了等于没改。
-  const styleTag = documentStub.head.children.find((node) => node.id === 'ybb-optimizer-style')
+  const styleTag = documentStub.head.children.find((node) => node.id === 'prompt-hardener-style')
   assert.ok(styleTag, '样式表没挂上')
 })

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-ybb-optimizer",
+  "name": "dsh-prompt-hardener",
   "version": "0.1.0",
   "description": "硬邦邦化：把用户提示词改写成肌肉硬汉风格，再交给模型（DSH 插件）。",
   "type": "module",
@@ -47,11 +47,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ffyfox/dsh-ybb-optimizer.git"
+    "url": "git+https://github.com/ffyfox/dsh-prompt-hardener.git"
   },
-  "homepage": "https://github.com/ffyfox/dsh-ybb-optimizer#readme",
+  "homepage": "https://github.com/ffyfox/dsh-prompt-hardener#readme",
   "bugs": {
-    "url": "https://github.com/ffyfox/dsh-ybb-optimizer/issues"
+    "url": "https://github.com/ffyfox/dsh-prompt-hardener/issues"
   }
 }
 

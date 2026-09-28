@@ -1,6 +1,6 @@
-# 硬邦邦 · dsh-ybb-optimizer
+# 硬邦邦 · dsh-prompt-hardener
 
-![test](https://github.com/ffyfox/dsh-ybb-optimizer/actions/workflows/test.yml/badge.svg)
+![test](https://github.com/ffyfox/dsh-prompt-hardener/actions/workflows/test.yml/badge.svg)
 
 一个 [DSH](https://github.com/deepseek-ai) 插件：**你按下回车之前，需求先被改写成肌肉集团下的军令状。**
 
@@ -24,7 +24,7 @@
 3. 在弹出的对话框里，往 **「包名或地址」** 这一栏粘贴仓库地址：
 
    ```
-   https://github.com/ffyfox/dsh-ybb-optimizer
+   https://github.com/ffyfox/dsh-prompt-hardener
    ```
 
    ⚠️ 本插件**暂未发布到 npm**。
@@ -33,7 +33,7 @@
 ### 命令行版（`dsh web` 这类自管 profile）
 
 ```bash
-dsh plugin --profile web add github:ffyfox/dsh-ybb-optimizer
+dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
 ```
 
 ## 使用
@@ -58,12 +58,12 @@ dsh plugin --profile web add github:ffyfox/dsh-ybb-optimizer
 
 ## 卸载
 
-界面里：**设置 → 插件** → 找到 `dsh-ybb-optimizer` → **卸载** → 重启应用。
+界面里：**设置 → 插件** → 找到 `dsh-prompt-hardener` → **卸载** → 重启应用。
 
 命令行版：
 
 ```bash
-dsh plugin --profile web remove dsh-ybb-optimizer
+dsh plugin --profile web remove dsh-prompt-hardener
 ```
 
 ## 它干了什么

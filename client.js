@@ -1,5 +1,5 @@
 /**
- * dsh-ybb-optimizer — 浏览器半边。
+ * dsh-prompt-hardener — 浏览器半边。
  *
  * 在输入框控制行（`conversation.input.left`）挂一根「力量条」：五格硬度。面板上不养闲字。
  *
@@ -13,23 +13,23 @@
  * - 五格硬度那一行是整幅面板宽，按钮文字不省略 —— "丧心病狂"四个字必须完整显示；
  *   收起的药丸上用短标签，免得把窄窄的输入框控制行撑变形。
  *
- * @module dsh-ybb-optimizer/client
+ * @module dsh-prompt-hardener/client
  */
 
 window.__ModuleLoader__.load({
-  id: 'dsh-ybb-optimizer',
+  id: 'dsh-prompt-hardener',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
     /** 必须等于 host 包名：模块表按包身份对账。 */
-    const name = 'dsh-ybb-optimizer'
+    const name = 'dsh-prompt-hardener'
 
     /** host 注册的状态路由。 */
-    const STATE_ROUTE = '/plugins/dsh-ybb-optimizer/state.json'
+    const STATE_ROUTE = '/plugins/dsh-prompt-hardener/state.json'
 
     /** 语言域命名空间。 */
-    const NS = 'ybb-optimizer'
+    const NS = 'prompt-hardener'
 
     /** 五档硬度，从弱到强。 */
     const LEVELS = ['off', 'light', 'standard', 'brutal', 'insane']

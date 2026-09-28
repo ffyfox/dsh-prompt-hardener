@@ -7,6 +7,6 @@
 # 桌面版（Electron）的 profile 由应用独占、CLI 装不进去，改用 profile 顶层 patch 里
 # 一条等价的 `- insert:`，`name` 写成指向 index.js 的绝对路径。见 README。
 - insert:
-    - id: ybb-optimizer
-      name: 'dsh-ybb-optimizer'
+    - id: prompt-hardener
+      name: 'dsh-prompt-hardener'
       config: {}

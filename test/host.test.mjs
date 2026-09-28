@@ -519,7 +519,7 @@ test('回归：路由注册失败也不许拖垮整个插件（"插件加载失�
   // HMR 重入时旧路由 disposer 还没跑，重复注册直接抛 duplicate exact route。
   const { ctx, listeners, routes, provideWebServer } = makeCtx(llm, {
     webServer: 'later',
-    registerThrows: 'webserver: duplicate exact route "/plugins/dsh-ybb-optimizer/state.json"',
+    registerThrows: 'webserver: duplicate exact route "/plugins/dsh-prompt-hardener/state.json"',
   })
 
   // 关键：apply 不许抛。抛了整行就会被标成 "failed"（fiber state 3）并掉出装配树。
