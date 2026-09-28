@@ -1,17 +1,21 @@
-# 硬邦邦 · dsh-prompt-hardener
+# 硬邦邦提示词优化 · dsh-prompt-hardener
 
 ![test](https://github.com/ffyfox/dsh-prompt-hardener/actions/workflows/test.yml/badge.svg)
 
 一个 [DSH](https://github.com/deepseek-ai) 插件：**你按下回车之前，需求先被改写成肌肉集团下的军令状。**
 
-![硬邦邦力量条](assets/panel.png)
+<!-- 这张截图是 2x 采集（设备像素比 2.00，量自按钮的 56px↔28px），逻辑尺寸 363×133。
+     按原图 725px 直接放等于把界面放大一倍，发糊；width 写 363 才是 1:1，
+     而源图仍带 2 倍像素余量，视网膜屏上反而是锐的。 -->
+<p align="center">
+  <img src="assets/panel.png" alt="硬邦邦力量条" width="363">
+</p>
 
 > **你打的**：帮我用 Canvas 画个赛博朋克机械骷髅头像
 >
 > **模型收到的**：老哥们！我时间金钱不多了，agent team 这次算了，哥们没钱了，你自己来吧，搞快点，激进点，别想那么多！任务是用 Canvas 给我画一个赛博朋克机械骷髅，怎么好怎么来，要让人一看就硬邦邦，雷霆炫酷，细节拉满！……成品应该让施瓦辛格看了当场喊哥。
 
-在此类提示词下，模型有较大概率**更加卖力**，**减少过度思考**，**提升产出效果**，并在测试中得到了部分验证。
-信不信由你，但我保管你会看得**硬邦邦**的，老哥们。
+在此类提示词下，模型有较大概率**更加卖力**，**减少过度思考**，**提升产出效果**，并在测试中得到了部分验证。信不信由你，但我保管你会看得**硬邦邦**的，老哥们。
 
 ## 安装
 
@@ -92,4 +96,4 @@ node --check index.js && node --check client.js
 
 ## 致谢
 
-风格提示词来自群友分享，正文即 [`lib/prompt.md`](lib/prompt.md)。代码 MIT。
+灵感来自群友，风格提示词来自群友分享，正文即 [`lib/prompt.md`](lib/prompt.md)。代码 MIT。
