@@ -1,0 +1,12 @@
+# bundle 层：把插件行插进装配树。
+#
+# 当本包被列进 profile 的 `dsh.profile.bundles`（`dsh plugin add` 会自动做这件事），
+# 装配器会读这一层，把下面这条 entry 插进根条目表 —— host 半边被加载，client-modules
+# 又会顺着本包 package.json 里的 `dsh.client` 找到 ./client.js 发给浏览器。
+#
+# 桌面版（Electron）的 profile 由应用独占、CLI 装不进去，改用 profile 顶层 patch 里
+# 一条等价的 `- insert:`，`name` 写成指向 index.js 的绝对路径。见 README。
+- insert:
+    - id: ybb-optimizer
+      name: 'dsh-ybb-optimizer'
+      config: {}

@@ -1,0 +1,57 @@
+{
+  "name": "dsh-ybb-optimizer",
+  "version": "0.1.0",
+  "description": "硬邦邦化：把用户提示词改写成肌肉硬汉风格，再交给模型（DSH 插件）。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "prompt",
+    "硬邦邦",
+    "肌肉集团"
+  ],
+  "author": "ffyfox",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ffyfox/dsh-ybb-optimizer.git"
+  },
+  "homepage": "https://github.com/ffyfox/dsh-ybb-optimizer#readme",
+  "bugs": {
+    "url": "https://github.com/ffyfox/dsh-ybb-optimizer/issues"
+  }
+}
+

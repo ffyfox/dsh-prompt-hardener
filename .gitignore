@@ -1,0 +1,11 @@
+# 私有素材，不随包发布
+/prompt.md
+
+# 产物
+node_modules/
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
