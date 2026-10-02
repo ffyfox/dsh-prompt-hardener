@@ -5,8 +5,11 @@
 
 一个 [DSH](https://github.com/deepseek-ai) 插件：**你按下回车之前，需求先被改写成肌肉集团下的军令状。**
 
+<!-- 两张截图都是 2x 采集（设备像素比 2.00，量自「丧心病狂」那颗按钮的 56px↔28px），
+     逻辑尺寸 366×206 与 725×284。按原图像素直接放等于把界面放大一倍、还发糊；
+     width 写逻辑尺寸才是 1:1，视网膜屏上一个图像像素正好对一个屏幕像素。 -->
 <p align="left">
-  <img src="assets/panel.png" alt="硬邦邦力量条">
+  <img src="assets/panel.png" alt="硬邦邦力量条" width="366">
 </p>
 
 > **你打的**：帮我用 Canvas 画个赛博朋克机械骷髅头像
@@ -44,7 +47,9 @@ dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
 
 ## 使用
 
-![输入框左下角的硬邦邦挂件](assets/in-app.png)
+<p align="left">
+  <img src="assets/in-app.png" alt="输入框左下角的硬邦邦挂件" width="725">
+</p>
 
 | 力量条 | 效果 |
 | --- | --- |
