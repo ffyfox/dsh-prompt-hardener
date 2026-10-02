@@ -5,11 +5,8 @@
 
 一个 [DSH](https://github.com/deepseek-ai) 插件：**你按下回车之前，需求先被改写成肌肉集团下的军令状。**
 
-<!-- 这张截图是 2x 采集（设备像素比 2.00，量自按钮的 56px↔28px），逻辑尺寸 363×133。
-     按原图 725px 直接放等于把界面放大一倍，发糊；width 写 363 才是 1:1，
-     而源图仍带 2 倍像素余量，视网膜屏上反而是锐的。 -->
 <p align="left">
-  <img src="assets/panel.png" alt="硬邦邦力量条" width="363">
+  <img src="assets/panel.png" alt="硬邦邦力量条">
 </p>
 
 > **你打的**：帮我用 Canvas 画个赛博朋克机械骷髅头像
@@ -32,16 +29,18 @@
    dsh-prompt-hardener
    ```
 
-   填仓库地址 `https://github.com/ffyfox/dsh-prompt-hardener` 也认，那条路走 git、拉的是最新源码。
-4. 点 **「安装」**，启用插件并重启DSH。
+   或填仓库地址 `https://github.com/ffyfox/dsh-prompt-hardener`。
+4. 点 **「安装」**，启用插件并重启 DSH。
 
 ### 命令行版（`dsh web` 这类自管 profile）
 
 ```bash
+# 从 npm 装（推荐）
 dsh plugin --profile web add dsh-prompt-hardener
-```
 
-想装仓库里的最新源码，就换成 `github:ffyfox/dsh-prompt-hardener`。
+# 装 GitHub 上的最新源码
+dsh plugin --profile web add github:ffyfox/dsh-prompt-hardener
+```
 
 ## 使用
 
@@ -52,10 +51,23 @@ dsh plugin --profile web add dsh-prompt-hardener
 | 关 | 原样放行，什么都不做 |
 | 轻 / 中 / 重 / 丧心病狂 | 一档比一档浮夸 |
 
-- 点一下切档，**立刻生效**，不用重启。收起后就是输入框左下角那个 `硬邦邦·狂` 的小挂件，点它展开。
-- **想换风格就改提示词**：`~/.dsh/ybb-optimizer/prompt.md`，**改完下一条消息生效**，不用重启。
-  默认内容就是 [`lib/prompt.md`](lib/prompt.md)，首次激活时播种过去，之后你改的那份不会被覆盖。
-- 自己已经写得很硬的消息会被跳过（不二次套娃，也省一次调用）。
+- 点一下切档，**立刻生效**。收起后是输入框里 `硬邦邦` 的小挂件，档位由**颜色 + 力量条**标识。
+- **想换风格就改提示词**：`~/.dsh/prompt-hardener/prompt.md`，**改完下一条消息生效**，不用重启。默认内容就是 [`lib/prompt.md`](lib/prompt.md)。老版本留下的 `~/.dsh/ybb-optimizer/` 会在激活时**整体改名**过来，你定制过的提示词一字不少。
+- 自己已经写得很硬的消息会被跳过。
+
+### 发送方式
+
+| 档 | 点了发送之后 |
+| --- | --- |
+| **自动**（默认） | 直接发出去并自动改写 |
+| **审查** | **先不发**：弹出卡片，包含改写后的定稿 |
+
+审查模式的卡片上：
+
+- 正文**可以直接改**，点 **「发出」**（或按 `Cmd/Ctrl+Enter`）才真发出去。
+- **「按原文发出」**：按你原本打的字发。
+- **「撤回」**（或按 `Esc`）：关掉卡片。
+- 改写失败时卡片停在失败态并写明原因；可「重试」或「按原文发出」。
 
 ## 代价
 
@@ -75,28 +87,23 @@ dsh plugin --profile web remove dsh-prompt-hardener
 
 ## 功能
 
-只干一件事：在 `agent/pre-step` 拦下**你亲手打的那条消息**，交给模型按提示词**全量重写**，
-落库的就是改写后的文本。
+只干一件事：在 `agent/pre-step` 拦下**你亲手打的那条消息**，交给模型按提示词**全量重写**，落库的就是改写后的文本。
 
-于是有一个副作用你得知道：**聊天记录里显示的就是模型真正收到的**，不满意只能重说一遍，
-撤销不回来。子代理的提示词、斜杠命令都不会碰。
+子代理的提示词、斜杠命令都不会碰。
 
 ## 开发
 
 ```bash
-node --test test/*.test.mjs                 # 45 个用例
+node --test test/*.test.mjs                 # 79 个用例
 node --check index.js && node --check client.js
 ```
 
-零依赖：host 半边不 import 任何 DSH 包，浏览器半边只 `require('react')`（页面模块表提供），
-所以没有构建步骤，改完直接用。
+零依赖：host 半边不 import 任何 DSH 包，浏览器半边只 `require('react')`（页面模块表提供），所以没有构建步骤，改完直接用。
 
-`test/cordis.test.mjs` 用宿主里那份**真 cordis** 跑启动时序（机器上找不到该运行时自动跳过，
-可用 `YBB_CORDIS` 指路）；`test/host.test.mjs` 里那个假 ctx 会照抄 cordis 的语义 ——
-服务没就绪时裸访问照样抛错，免得测试比现实宽容。
+`test/cordis.test.mjs` 用宿主里那份**真 cordis** 跑启动时序（机器上找不到该运行时自动跳过，可用 `PH_CORDIS` 指路）；`test/host.test.mjs` 里那个假 ctx 会照抄 cordis 的语义 —— 服务没就绪时裸访问照样抛错，免得测试比现实宽容。
 
 > host 半边（`index.js` / `lib/*`）改完**要重启应用**才生效。`prompt.md` 不用。
 
 ## 致谢
 
-灵感来自群友，风格提示词来自群友分享，正文即 [`lib/prompt.md`](lib/prompt.md)。代码 MIT。
+灵感来自群友**正负等式**，风格提示词来自群友**初音ミクぁ**，正文即 [`lib/prompt.md`](lib/prompt.md)。代码 MIT。
