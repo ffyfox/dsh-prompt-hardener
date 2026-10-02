@@ -6,7 +6,7 @@
  * 这个真实时序在全部测试里一个都没拦住，而线上控制条报 405、界面标"加载失败"。
  * 假件可以再写歪，真件不会：这里直接用宿主里那份 cordis，跑真实 fiber 状态。
  *
- * 没有 cordis 运行时的机器上自动跳过（可用 YBB_CORDIS 指到另一份）。
+ * 没有 cordis 运行时的机器上自动跳过（可用 PH_CORDIS 指到另一份）。
  */
 
 import assert from 'node:assert/strict'
@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 const CANDIDATES = [
-  process.env.YBB_CORDIS,
+  process.env.PH_CORDIS,
   '/opt/deepseek-harness-desktop/resources/app/dsh/node_modules/@deepseek-ai/cordis/lib/index.js',
 ].filter(Boolean)
 
@@ -30,10 +30,10 @@ for (const candidate of CANDIDATES) {
   }
 }
 
-const skip = cordis === null ? '本机没有 cordis 运行时（可用 YBB_CORDIS 指定）' : false
+const skip = cordis === null ? '本机没有 cordis 运行时（可用 PH_CORDIS 指定）' : false
 
 test('真 cordis：冷启动时 webServer 晚于插件就绪，路由仍须补上且 fiber 不许是 FAILED', { skip }, async () => {
-  process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'ybb-cordis-'))
+  process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'ph-cordis-'))
   const mod = await import('../index.js')
 
   const root = new cordis.Context()
@@ -65,7 +65,7 @@ test('真 cordis：冷启动时 webServer 晚于插件就绪，路由仍须补�
 })
 
 test('真 cordis：宿主没有 webServer 时也必须激活成功（headless 容忍）', { skip }, async () => {
-  process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'ybb-cordis-headless-'))
+  process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'ph-cordis-headless-'))
   const mod = await import('../index.js')
 
   const root = new cordis.Context()

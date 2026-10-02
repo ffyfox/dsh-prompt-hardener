@@ -10,8 +10,9 @@
  *    纯函数派生），所以这里没有第二条路。
  * 2. **做主路径改写**：把原话交给模型，按 `lib/prompt.md`（可外部编辑）全量重写。
  *    模型调用失败时回落到 `lib/fallback.js` 的规则拼接，保证这一轮不白跑。
- * 3. **持久化开关**。状态写在 `$DSH_HOME/ybb-optimizer/state.json`，不放在包目录里
- *    —— 包目录会被插件升级整体替换掉。
+ * 3. **持久化开关**。状态写在 `$DSH_HOME/prompt-hardener/state.json`，不放在包目录里
+ *    —— 包目录会被插件升级整体替换掉。旧名 `ybb-optimizer` 的目录会在激活时整体迁移
+ *    过来（见 `migrateDataDirectory`），所以改名不会丢用户手改的 prompt.md 和开关状态。
  * 4. **给浏览器半边供数**。注册一条 `webServer` 路由，供输入框控制条读写状态。
  *
  * 三条实现纪律：
@@ -26,7 +27,7 @@
  */
 
 import { readFileSync, statSync } from 'node:fs'
-import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rmdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -53,20 +54,44 @@ export const name = 'prompt-hardener'
 export const inject = []
 
 /** 插件自己的数据目录名。 */
-const DATA_DIRNAME = 'ybb-optimizer'
+const DATA_DIRNAME = 'prompt-hardener'
+/**
+ * 改名前的数据目录名。
+ *
+ * 2026-09-29 那次改名（`dsh-ybb-optimizer` → `dsh-prompt-hardener`）**故意**没动这个目录，
+ * 因为改了等于把用户手改的 `prompt.md` 和开关状态（`state.json`）一起弄丢。现在补一次
+ * **带迁移**的改名：目录跟着产品名走，但旧目录会被整体搬过来，数据一件不少。
+ */
+const LEGACY_DATA_DIRNAME = 'ybb-optimizer'
 /** 状态文件名。 */
 const STATE_FILENAME = 'state.json'
 /** 外部可编辑的提示词文件名。 */
 const PROMPT_FILENAME = 'prompt.md'
 /** 浏览器半边读写的路由。 */
 export const STATE_ROUTE = '/plugins/dsh-prompt-hardener/state.json'
+/**
+ * 审查卡片的路由。一个路径两个动词，因为它们服务的是同一件事：
+ * - `POST` `{ text }` → 改写一遍并回传候选定稿（**不发消息**，消息还躺在输入框里）。
+ * - `PUT`  `{ text }` → 登记"这条是用户确认过的定稿"，让 pre-step 别再改写它。
+ */
+export const REVIEW_ROUTE = '/plugins/dsh-prompt-hardener/review'
 /** 请求体大小上限，避免被塞爆内存。 */
 const MAX_BODY_BYTES = 64 * 1024
+
+/**
+ * 审查模式。这两档只影响**浏览器半边**怎么发消息：
+ * - `auto`：老行为 —— 点了发送就发出去，改写发生在宿主 `agent/pre-step` 里，发完改不了。
+ * - `review`：点了发送先被浏览器半边拦下，弹一张卡片让人过一眼、改一改，确认了才真发。
+ *
+ * 宿主这边只多做一件事：认下"用户确认过的定稿"，别在 pre-step 里把它再改写一遍。
+ */
+export const MODES = Object.freeze(['auto', 'review'])
 
 /** 出厂默认值。profile patch 里的 row config 覆盖它，用户界面的选择再覆盖两者。 */
 const DEFAULTS = Object.freeze({
   enabled: true,
   intensity: 'standard',
+  mode: 'auto',
   llm: Object.freeze({
     provider: '',
     model: '',
@@ -103,6 +128,70 @@ export function dataDirectory() {
   return join(home, DATA_DIRNAME)
 }
 
+/** 旧数据目录（改名前的名字），只用于迁移。 */
+export function legacyDataDirectory() {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  return join(home, LEGACY_DATA_DIRNAME)
+}
+
+/**
+ * 一次性迁移：新目录不存在、旧目录存在时，把旧目录**整体改名**过来。
+ *
+ * 三条纪律：
+ * - 只做 `rename`，不做"复制后删"。改名是原子的：要么全过来，要么原封不动，
+ *   不存在"复制到一半崩了，用户既没有旧数据也没有新数据"的中间态。
+ * - **绝不预先创建目标目录**。它的父目录就是 `DSH_HOME`，而旧目录既然存在、父目录必然
+ *   存在 —— 预建纯属多余。而且目标若已存在，只有**空目录**才让它让路：空壳里没有任何
+ *   用户数据（是上一次迁移半途留下的），删掉再搬是安全的；非空就一律收手，绝不覆盖。
+ * - 任何失败都只返回 `'failed'`，不抛、不改写、不删用户的任何文件。迁移失败最坏的结果
+ *   是继续用包内自带提示词，而不是把用户的文件搞坏。
+ *
+ * 返回值把"没什么可迁"和"已经有人在用"分开，**因为这两件事的诊断含义完全不同**：
+ * 2026-10-02 真机实测踩到过——插件被应用了两次，第二次看到新目录已存在，信标里写着
+ * `dataMigration: none`，看起来像"迁移没跑、用户数据被落在原地了"，其实第一次早就迁完了。
+ * 分开之后，看到 `in-use` 就知道是"有人先动过手"，而不是"漏了"。
+ *
+ * @returns {Promise<'none'|'in-use'|'migrated'|'failed'>} 迁移结果。
+ */
+export async function migrateDataDirectory() {
+  const target = dataDirectory()
+  const legacy = legacyDataDirectory()
+
+  let targetExists = false
+  try {
+    targetExists = statSync(target).isDirectory()
+  } catch {
+    targetExists = false
+  }
+  let legacyExists = false
+  try {
+    legacyExists = statSync(legacy).isDirectory()
+  } catch {
+    legacyExists = false
+  }
+
+  if (!legacyExists) return targetExists ? 'in-use' : 'none'
+
+  if (targetExists) {
+    // 空壳让路；非空（真在用）就收手。`rmdir` 对非空目录会抛 ENOTEMPTY，所以这一句
+    // 同时就是"它是不是空壳"的判据，不用自己去列目录。**这一条在 Windows 上尤其要命**：
+    // 那边 `rename` 不允许覆盖已存在的目录，一次半途失败留下的空壳会把此后每一次迁移
+    // 都堵死，而用户那边一点报错都看不到。
+    try {
+      await rmdir(target)
+    } catch {
+      return 'in-use'
+    }
+  }
+
+  try {
+    await rename(legacy, target)
+    return 'migrated'
+  } catch {
+    return 'failed'
+  }
+}
+
 /** 状态文件绝对路径。 */
 export function stateFile() {
   return join(dataDirectory(), STATE_FILENAME)
@@ -126,9 +215,9 @@ export function bundledPromptFile() {
 /**
  * 保真约束。**放在代码里而不是提示词文件里**：它是"不许丢技术内容"的最后一道闸，
  * 不能因为用户换了一份 prompt.md 就跟着消失。每次调用时另起一段拼在系统提示词后面，
- * ybb.md 原文一字不动。
+ * 提示词正文一字不动。
  *
- * 第 2 条是实测逼出来的：只写"别替用户做资源决策"时，模型仍然会照着 ybb.md 的开场白
+ * 第 2 条是实测逼出来的：只写"别替用户做资源决策"时，模型仍然会照着提示词里那两句开场白
  * 硬写"agent team 这次算了"（替用户宣布没钱），给代码任务硬加"电脑烧了我都夸你有劲"。
  * 所以这里把这两种具体越界点名。
  */
@@ -241,6 +330,13 @@ function nonNegative(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback
 }
 
+/** 把未知输入收敛成合法审查模式。 */
+export function normalizeMode(value, fallback = DEFAULTS.mode) {
+  if (typeof value !== 'string') return fallback
+  const id = value.trim().toLowerCase()
+  return MODES.includes(id) ? id : fallback
+}
+
 /**
  * 校验并规整一份状态。非法字段一律回落到默认值，绝不因为坏数据拒绝启动。
  * @param {unknown} raw 候选状态。
@@ -253,6 +349,7 @@ export function sanitizeState(raw, defaults = DEFAULTS) {
   return {
     enabled: bool(source.enabled, defaults.enabled),
     intensity: normalizeIntensity(source.intensity ?? defaults.intensity),
+    mode: normalizeMode(source.mode, defaults.mode),
     llm: {
       provider: typeof llmRaw.provider === 'string' ? llmRaw.provider : defaults.llm.provider,
       model: typeof llmRaw.model === 'string' ? llmRaw.model : defaults.llm.model,
@@ -395,6 +492,39 @@ function autoMaxTokens(chars) {
 }
 
 /**
+ * 审查卡片用的模型路由。
+ *
+ * 这条路上**没有 agent**（不是某个回合发起的，消息还躺在输入框里），所以 `resolveRoute`
+ * 的后两级回退（落库请求头 / agent 创建时路由）全都用不上。改成两级：
+ *
+ * 1. 插件的 `llm.provider` + `llm.model`（用户显式钉死）；
+ * 2. 宿主的默认模型服务 `agentDefaultModel` —— 这正是"下一条消息会用哪个模型"。
+ *
+ * @param {object} ctx cordis 上下文。
+ * @param {object} configured 插件配置里的 llm 段。
+ * @returns {{ provider: string, model: string }} 解析出的路由。
+ */
+function reviewRoute(ctx, configured) {
+  const explicit = configured && typeof configured === 'object' ? configured : {}
+  const provider = typeof explicit.provider === 'string' ? explicit.provider : ''
+  const model = typeof explicit.model === 'string' ? explicit.model : ''
+  if (provider && model) return { provider, model }
+
+  let picked = null
+  try {
+    const service = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : null
+    if (service && typeof service.currentSelection === 'function') picked = service.currentSelection()
+  } catch {
+    /* 宿主没装这个服务就当没有，交给调用方按"没有路由"降级 */
+  }
+  const fallback = picked && typeof picked === 'object' ? picked : {}
+  return {
+    provider: provider || (typeof fallback.provider === 'string' ? fallback.provider : ''),
+    model: model || (typeof fallback.model === 'string' ? fallback.model : ''),
+  }
+}
+
+/**
  * 调一次模型，按提示词全量重写用户原话。
  * @param {object} ctx cordis 上下文。
  * @param {object} agent 当前 agent。
@@ -444,6 +574,44 @@ async function llmRewrite(ctx, agent, text, options) {
   const trimmed = out.trim()
   if (trimmed.length === 0) throw new Error('llm produced no text')
   return trimmed
+}
+
+/**
+ * 改写一条文本：模型优先，模型不可用 / 没路由 / 吐空时回落到规则拼接。
+ *
+ * **pre-step 与审查卡片共用这一条。** 两边各写一份迟早会漂移，而"审查卡片上看到的"
+ * 与"不审查直接发出去得到的"必须是同一个东西 —— 否则审查模式就变成了另一套行为。
+ *
+ * @param {object} ctx cordis 上下文。
+ * @param {object|null} agent 当前 agent。审查卡片那条路上**没有 agent**（不是回合发起的）。
+ * @param {string} text 待改写正文。
+ * @param {object} options `{ llm, intensity, prompt, signal, seed, allowLlm }`。
+ * @returns {Promise<{ text: string, changed: boolean, source: string|null, error: string|null, meta: object|null }>}
+ *          `changed: false` 表示连规则兜底都没能改动它（调用方按"原样放行"处理）。
+ */
+async function rewriteText(ctx, agent, text, options) {
+  let candidate = null
+  let source = null
+  let error = null
+
+  if (options.allowLlm !== false) {
+    try {
+      candidate = await llmRewrite(ctx, agent, text, options)
+      source = 'llm'
+    } catch (cause) {
+      error = String((cause && cause.message) || cause)
+    }
+  }
+
+  if (candidate === null) {
+    const fallback = assembleFallback(text, { intensity: options.intensity, seed: options.seed })
+    if (fallback.changed) {
+      return { text: fallback.text, changed: true, source: 'rules-fallback', error, meta: fallback.meta }
+    }
+  }
+
+  if (candidate === null) return { text, changed: false, source: null, error, meta: null }
+  return { text: candidate, changed: true, source, error, meta: null }
 }
 
 /** 用原生 req/res 读 JSON 请求体（不引入任何依赖）。 */
@@ -502,6 +670,7 @@ export function publicState(state) {
   return {
     enabled: state.enabled,
     intensity: state.intensity,
+    mode: state.mode,
     llm: { ...state.llm },
     stats: { ...state.stats },
     revision: state.revision,
@@ -562,7 +731,12 @@ export function apply(ctx, config) {
     }, null, 2)
     // 串行 + 先写临时文件再 rename：enter 与 ready 两笔是并发发起的，
     // 直接 writeFile 会把两次内容交错成非法 JSON（2026-09-29 实测踩到）。
+    //
+    // 而且**每一笔信标都必须排在数据目录迁移之后**：写信标要 `mkdir` 数据目录，
+    // 一旦它先跑，迁移就会看见"新目录已经在用"而收手，用户的旧 prompt.md 与开关
+    // 状态就被悄悄落在原地了。这里用 await 把顺序钉死，不靠"谁的微任务先排上"。
     beaconChain = beaconChain.then(async () => {
+      await dataMigration
       const file = statusFile()
       await mkdir(dirname(file), { recursive: true })
       const tmp = `${file}.tmp`
@@ -611,9 +785,25 @@ export function apply(ctx, config) {
     return writeChain
   }
 
+  /**
+   * 迁移**必须最先起跑，而且是同步起跑**：它要排在两个对手前面 ——
+   * 1. enter 信标（它要 `mkdir` 数据目录）。信标先落地的话，迁移会看见"新目录已经在用"
+   *    就收手，用户手改的 `prompt.md` 与开关状态被静默地落在旧目录里。
+   * 2. `load()` 读状态文件。迁移是**异步改名**，读盘那一刻新路径上还是空的 ⇒ 读到 ENOENT
+   *    ⇒ 内存里是出厂默认（intensity=standard、mode=auto）⇒ 用户自己选的档位与审查模式
+   *    消失，而且第一轮统计一写盘还会把默认值落回状态文件，等于把用户的设置覆盖掉。
+   *    （这条 2026-10-02 真机实测踩到过，见 test/host.test.mjs 里那两条回归。）
+   *
+   * 所以：promise 在这里先起出来，`load()` 与信标链都 await 它。
+   * 迁移失败不抛（`catch` 成 `'failed'`），它绝不能拦住插件本体。
+   */
+  const dataMigration = migrateDataDirectory().catch(() => 'failed')
+
   const load = async () => {
     if (loaded) return state
     loaded = true
+    // 等迁移跑完再读盘，理由见上面第 2 条。
+    await dataMigration
     try {
       const raw = await readFile(stateFile(), 'utf8')
       state = sanitizeState({ ...defaults, ...JSON.parse(raw) }, defaults)
@@ -625,6 +815,54 @@ export function apply(ctx, config) {
 
   // 先把磁盘态读进来；读盘期间 pre-step 用同步的默认值，不会阻塞首轮。
   void load()
+
+  /* ───────────────── 0.5 审查模式的"已确认定稿"登记簿 ───────────────── */
+
+  /**
+   * 审查模式下用户点过"发出"的定稿。pre-step 见到与它逐字相同的用户消息就**跳过改写**。
+   *
+   * 为什么非要有这个东西：卡片上发出的定稿是**已经在审查路由里改写过的**，如果放它
+   * 再走一遍 pre-step，就等于改写两次（第二次还可能把用户的手改冲掉）。所以放行前先
+   * 在这里记一笔，pre-step 认领时按正文匹配、**用过即作废**。
+   *
+   * 三条约束：
+   * - 只认**完全相同**的正文（比对前压掉空白差异）。认不出就照常改写 —— 保守的那一边
+   *   是"多改写一次"，而不是"拿一条没登记的正文去免检"。
+   * - 一次性：消费掉就删，避免同一条正文第二次出现时被误免检。
+   * - 有上限也有保质期：万一登记了却没发出（用户点了发出又切走），也不会永远堆着。
+   */
+  const released = []
+  const RELEASED_MAX = 8
+  const RELEASED_TTL_MS = 10 * 60 * 1000
+
+  /** 比对用的归一化：只压空白，不改内容。 */
+  const releaseKey = (text) => String(text ?? '').replace(/\s+/g, ' ').trim()
+
+  /** 登记一条"已确认定稿"。 */
+  const markReleased = (text) => {
+    const key = releaseKey(text)
+    if (key.length === 0) return
+    const at = released.findIndex((item) => item.key === key)
+    if (at >= 0) released.splice(at, 1)
+    released.push({ key, at: Date.now() })
+    while (released.length > RELEASED_MAX) released.shift()
+  }
+
+  /**
+   * 消费一条登记。命中即删。
+   * @param {string} text 即将进入 pre-step 的用户正文。
+   * @returns {boolean} 是否是用户已经确认过的定稿。
+   */
+  const consumeReleased = (text) => {
+    const now = Date.now()
+    while (released.length > 0 && now - released[0].at > RELEASED_TTL_MS) released.shift()
+    const key = releaseKey(text)
+    if (key.length === 0) return false
+    const at = released.findIndex((item) => item.key === key)
+    if (at < 0) return false
+    released.splice(at, 1)
+    return true
+  }
 
   // apply 一进来就先落一笔。这一笔的有无能把两种情况分开：
   //   没有这一笔 → 模块压根没 import 成功（apply 根本没跑）；
@@ -638,12 +876,25 @@ export function apply(ctx, config) {
     let cancelled = false
     void (async () => {
       let promptSeed = 'failed'
+      // 迁移在 apply 的同步前缀里就起出来了（见 `dataMigration`），这里只等它的结果。
+      // 顺序仍是硬要求：迁移**必须**先于播种 —— 反过来的话 seedPrompt 会先把新目录建出来
+      // 并塞进一份 prompt.md，之后 `rename` 撞上非空目录会以 ENOTEMPTY 失败，
+      // 用户的旧数据就永远搬不过来了。
+      const migration = await dataMigration
       try {
         promptSeed = await seedPrompt()
       } catch {
         /* 播种失败不影响拦截，resolvePrompt 会退到包内自带那份 */
       }
-      if (!cancelled) await writeBeacon({ phase: 'ready', promptSeed })
+      // 旧目录还在不在 —— 迁移失败或又一次实例化之后，这是唯一能一眼看出
+      // "用户的旧数据是不是被落在原地了"的字段。
+      let legacyLeftover = false
+      try {
+        legacyLeftover = statSync(legacyDataDirectory()).isDirectory()
+      } catch {
+        /* 不在就是不在了 */
+      }
+      if (!cancelled) await writeBeacon({ phase: 'ready', promptSeed, dataMigration: migration, legacyLeftover })
     })()
     return () => {
       cancelled = true
@@ -678,6 +929,16 @@ export function apply(ctx, config) {
           out.push(message)
           continue
         }
+        if (consumeReleased(collected.text)) {
+          // 审查模式下用户刚在卡片上确认过的**定稿**：模型已经改写过了，不能再改写一遍。
+          //
+          // 这里绝不能指望 looksHardman 兜底：用户手工把定稿改温和的时候它判不出来，
+          // 那样就会静默覆盖用户的编辑 —— 而"能改"正是这个功能存在的理由。
+          stat.reviewReleased = Number(stat.reviewReleased || 0) + 1
+          stat.lastSkip = 'review-released'
+          out.push(message)
+          continue
+        }
         if (looksHardman(collected.text)) {
           // 用户自己就写得很硬，别再套一层，也省一次模型调用。
           stat.skipped = Number(stat.skipped || 0) + 1
@@ -686,50 +947,41 @@ export function apply(ctx, config) {
           continue
         }
 
-        let rewritten = null
-        let source = null
         // 一个步骤里最多只打一次模型调用，避免成批入队时把延迟和账单翻倍。
-        if (!usedLlm) {
-          usedLlm = true
-          try {
-            rewritten = await llmRewrite(ctx, payload.agent, collected.text, {
-              llm: current.llm,
-              intensity: current.intensity,
-              prompt: prompt.text,
-              signal: payload.signal,
-            })
-            source = 'llm'
-          } catch (error) {
-            const reason = String((error && error.message) || error)
-            note(`llm rewrite failed, falling back to rules: ${reason}`)
-            stat.lastError = reason
-          }
+        // 注意 `usedLlm` 在**调用前**就置位：第一次失败之后剩下的消息直接走规则兜底，
+        // 不再逐条重试模型（否则一条坏消息能让整批消息各等一次超时）。
+        const allowLlm = !usedLlm
+        usedLlm = true
+
+        const outcome = await rewriteText(ctx, payload.agent, collected.text, {
+          llm: current.llm,
+          intensity: current.intensity,
+          prompt: prompt.text,
+          signal: payload.signal,
+          allowLlm,
+          seed: `${payload.agent && payload.agent.id ? payload.agent.id : 'agent'}|${message.id ?? ''}`,
+        })
+        if (outcome.error) {
+          note(`llm rewrite failed, falling back to rules: ${outcome.error}`)
+          stat.lastError = outcome.error
         }
 
-        if (rewritten === null) {
-          const fallback = assembleFallback(collected.text, {
-            intensity: current.intensity,
-            seed: `${payload.agent && payload.agent.id ? payload.agent.id : 'agent'}|${message.id ?? ''}`,
-          })
-          if (fallback.changed) {
-            rewritten = fallback.text
-            source = 'rules-fallback'
-            stat.lastFallbackSlots = fallback.meta.slots
-            stat.lastDomain = fallback.meta.domain
-            stat.lastIntensity = fallback.meta.intensity
-          }
-        }
-
-        if (rewritten === null) {
+        if (!outcome.changed) {
           stat.skipped = Number(stat.skipped || 0) + 1
           out.push(message)
           continue
         }
 
+        if (outcome.meta) {
+          stat.lastFallbackSlots = outcome.meta.slots
+          stat.lastDomain = outcome.meta.domain
+          stat.lastIntensity = outcome.meta.intensity
+        }
+
         changed = true
-        out.push(replaceText(message, collected, rewritten))
-        stat.lastSource = source
-        stat.lastChars = rewritten.length
+        out.push(replaceText(message, collected, outcome.text))
+        stat.lastSource = outcome.source
+        stat.lastChars = outcome.text.length
         stat.originalChars = collected.text.length
         stat.lastPromptSource = prompt.source
         stat.lastPromptChars = prompt.chars
@@ -774,7 +1026,7 @@ export function apply(ctx, config) {
         const method = String(req.method || 'GET').toUpperCase()
         await load()
         if (method === 'GET' || method === 'HEAD') {
-          send(200, { ok: true, state: publicState(state), route: STATE_ROUTE, intensities: INTENSITIES })
+          send(200, { ok: true, state: publicState(state), route: STATE_ROUTE, intensities: INTENSITIES, modes: MODES })
           return
         }
         if (method !== 'PUT' && method !== 'POST') {
@@ -783,7 +1035,14 @@ export function apply(ctx, config) {
         }
         const body = await readJsonBody(req)
         const patch = body && typeof body === 'object' && body.state ? body.state : body
-        state = sanitizeState({ ...state, ...(patch && typeof patch === 'object' ? patch : {}) }, defaults)
+        const next = { ...state, ...(patch && typeof patch === 'object' ? patch : {}) }
+        // `stats` 是**按字段合并**，不是整体替换。它是一堆互不相关的计数器，调用方通常只想
+        // 更新其中一个（只报一项统计、写一个诊断字段），整体替换会静默抹掉其余全部 ——
+        // 2026-10-02 实测踩到：一次 `{stats:{probeStage}}` 就把 rewrites / reviewCalls 抹平了。
+        if (patch && typeof patch === 'object' && patch.stats && typeof patch.stats === 'object') {
+          next.stats = { ...state.stats, ...patch.stats }
+        }
+        state = sanitizeState(next, defaults)
         state = { ...state, revision: Number(state.revision || 0) + 1 }
         await persist()
         send(200, { ok: true, state: publicState(state) })
@@ -827,6 +1086,135 @@ export function apply(ctx, config) {
       }
     }
   }, 'prompt-hardener: state route')
+
+  /* ───────────────────────── 3. 审查卡片的路由 ───────────────────────── */
+
+  mount(() => {
+    const handler = async (req, res) => {
+      const send = (code, payload) => {
+        const body = JSON.stringify(payload)
+        res.writeHead(code, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-length': Buffer.byteLength(body),
+        })
+        res.end(body)
+      }
+      try {
+        if (!isTrustedWrite(req)) {
+          send(403, { ok: false, error: 'cross-site request rejected' })
+          return
+        }
+        const method = String(req.method || 'GET').toUpperCase()
+        await load()
+        const body = method === 'GET' || method === 'HEAD' ? null : await readJsonBody(req)
+        const text = body && typeof body.text === 'string' ? body.text : ''
+
+        // 登记放行：用户已经在卡片上确认过了，pre-step 不许再改写。
+        if (method === 'PUT') {
+          if (text.trim().length === 0) {
+            send(400, { ok: false, error: 'text required' })
+            return
+          }
+          markReleased(text)
+          state = { ...state, stats: { ...state.stats, reviewReleases: Number(state.stats.reviewReleases || 0) + 1 } }
+          void persist()
+          send(200, { ok: true })
+          return
+        }
+
+        // 改写候选：只回传正文，**不动机器状态、不碰消息**（消息还在输入框里）。
+        if (method === 'POST') {
+          if (text.trim().length === 0) {
+            send(400, { ok: false, error: 'text required' })
+            return
+          }
+          const current = state
+          const patch = { reviewCalls: Number(current.stats.reviewCalls || 0) + 1, lastReviewAt: Date.now() }
+
+          // 整体关掉 / 火力关掉时，审查卡片没有任何东西可审 —— 直接告诉它"原样发出"。
+          if (!current.enabled || current.intensity === 'off') {
+            state = { ...state, stats: { ...state.stats, ...patch } }
+            void persist()
+            send(200, { ok: true, skipped: 'disabled', changed: false, text, source: null })
+            return
+          }
+          if (looksHardman(text)) {
+            state = { ...state, stats: { ...state.stats, ...patch, lastSkip: 'already-hardman' } }
+            void persist()
+            send(200, { ok: true, skipped: 'already-hardman', changed: false, text, source: null })
+            return
+          }
+
+          const prompt = resolvePrompt()
+          const route = reviewRoute(ctx, current.llm)
+          const outcome = await rewriteText(ctx, null, text, {
+            // 路由在这里是**显式**给全的：`resolveRoute` 见到成对的 provider/model 就直接返回，
+            // 不需要（也没有）一个 agent 来兜底。
+            llm: { ...current.llm, provider: route.provider, model: route.model },
+            intensity: current.intensity,
+            prompt: prompt.text,
+            seed: `review|${Date.now()}`,
+          })
+
+          state = {
+            ...state,
+            stats: {
+              ...state.stats,
+              ...patch,
+              ...(outcome.error ? { lastError: outcome.error } : {}),
+              lastReviewSource: outcome.source,
+              lastReviewChanged: outcome.changed,
+            },
+          }
+          void persist()
+          send(200, {
+            ok: true,
+            changed: outcome.changed,
+            text: outcome.text,
+            source: outcome.source,
+            error: outcome.error ?? null,
+            promptSource: prompt.source,
+          })
+          return
+        }
+
+        send(405, { ok: false, error: `method not allowed: ${method}` })
+      } catch (error) {
+        send(400, { ok: false, error: String((error && error.message) || error) })
+      }
+    }
+
+    const fiber = ctx.inject(['webServer'], (child) => {
+      let disposer = null
+      try {
+        disposer = child.webServer.register({ kind: 'exact', path: REVIEW_ROUTE, handler })
+      } catch (error) {
+        // 同状态路由：重复注册只记一笔。**审查能力本身不受影响** —— 拿不到这个路由时
+        // 浏览器半边会 fail-open 按原文发出，最坏结果是"回到了自动模式"。
+        const message = String((error && error.message) || error)
+        failures.push({ label: 'prompt-hardener: review route', message, at: Date.now() })
+        note(`review route registration failed: ${message}`)
+        return () => {}
+      }
+      note(`review route registered: ${REVIEW_ROUTE}`)
+      return () => {
+        try {
+          disposer()
+        } catch {
+          /* 已经卸掉就算了 */
+        }
+      }
+    })
+
+    return () => {
+      try {
+        void fiber.dispose()
+      } catch {
+        /* 同上 */
+      }
+    }
+  }, 'prompt-hardener: review route')
 }
 
 export { DEFAULTS, INTENSITIES, BUILTIN_PROMPT }
