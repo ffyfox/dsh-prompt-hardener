@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-hardener",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "硬邦邦化：把用户提示词改写成肌肉硬汉风格，再交给模型（DSH 插件）。",
   "type": "module",
   "main": "index.js",
