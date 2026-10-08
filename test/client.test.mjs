@@ -389,7 +389,7 @@ test('判据：发送键靠 aria-label 认出来，跟它在不在最后一位�
 test('审查相关的文案中英双语都得在', () => {
   const dict = registered.factory(() => ReactStub).__internals.DICT
   for (const lang of ['zh', 'en']) {
-    for (const key of ['mode', 'auto', 'review', 'reviewTitle', 'rewriting', 'send', 'sendOriginal', 'cancel', 'retry', 'failed']) {
+    for (const key of ['mode', 'auto', 'review', 'reviewTitle', 'rewriting', 'send', 'sendOriginal', 'cancel', 'retry', 'failed', 'toastTimeout', 'toastNoRoute', 'toastFailed', 'toastDismiss']) {
       assert.equal(typeof dict[lang][key], 'string', `${lang} 缺文案：${key}`)
     }
   }
@@ -458,10 +458,11 @@ test('英文语言域下，卡片与面板里不许再出现中文与全角标�
   assert.ok(pill, '找不到药丸')
   assert.ok(!CJK.test(String(pill.props.title)), `药丸悬停提示还是中文：${pill.props.title}`)
 
-  // 状态提示那一条（第三个界面：shell.overlay 上的 toast）。
+  // 状态提示那一条（第三个界面：shell.overlay 上的 toast）。四种都过一遍：三种归因
+  // 加一种宿主将来才会有的未知种类（它得能退到最宽的那句，而不是显示成键名或中文）。
   const toastBag = module.__internals.toastBag()
   const Stack = module.__internals.makeToastStack((key) => (dict.en[key] || key))
-  for (const kind of ['timeout']) {
+  for (const kind of ['timeout', 'no-route', 'llm-failed', 'brand-new-kind']) {
     toastBag.items = []
     toastBag.seenAt = 0
     module.__internals.pushToast({ kind, detail: 'AbortError: timed out' })
@@ -901,6 +902,37 @@ test('toast 渲染者：平时渲染 null，有事时把话说清楚', () => {
   assert.ok(texts.includes('AbortError'), '原因要带上，不然只知道出事、不知道出了什么事')
   assert.ok(texts.includes(internals.DICT.zh.toastDismiss), '得能点掉')
   assert.ok(internals.CSS.includes('.ph-toasts'), 'CSS 里必须真有这一块，不然渲染出来是散的')
+
+  bag.items = []
+  bag.seenAt = 0
+})
+
+test('toast 标题按归因分三种：没路由不许被说成「模型没出力」', () => {
+  // 三种事故的用户动作完全不同：超时=可以重试/等等看；没路由=去配 provider/model；
+  // 空流/报错=模型那边的事。混成一句，用户就会照错的方向去查。
+  const { DICT, toastBag, pushToast, makeToastStack } = internals
+  const bag = toastBag()
+  const Stack = makeToastStack((key) => DICT.zh[key] || key)
+
+  const titleFor = (kind) => {
+    bag.items = []
+    bag.seenAt = 0
+    pushToast({ kind, detail: 'x' })
+    return textsOf(Stack({})).join(' | ')
+  }
+
+  const timeout = titleFor('timeout')
+  const noRoute = titleFor('no-route')
+  const failed = titleFor('llm-failed')
+  assert.ok(timeout.includes(DICT.zh.toastTimeout), `超时用了别的标题：${timeout}`)
+  assert.ok(noRoute.includes(DICT.zh.toastNoRoute), `没路由用了别的标题：${noRoute}`)
+  assert.ok(failed.includes(DICT.zh.toastFailed), `空流/报错用了别的标题：${failed}`)
+  assert.notEqual(DICT.zh.toastNoRoute, DICT.zh.toastFailed, '这两句不能是同一句')
+
+  // 宿主将来多报一种没见过的 kind：退到最宽的那句，不许显示成键名，也不许张冠李戴。
+  const unknown = titleFor('brand-new-kind')
+  assert.ok(unknown.includes(DICT.zh.toastFailed), `未知归因没有兜底：${unknown}`)
+  assert.ok(!unknown.includes('brand-new-kind'), `未知归因把键名画出来了：${unknown}`)
 
   bag.items = []
   bag.seenAt = 0

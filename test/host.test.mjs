@@ -1045,6 +1045,43 @@ test('超时归因：宿主把中断消化成空流，也要认成 timeout', asy
   assert.equal(stats.lastSource, 'rules-fallback')
 })
 
+test('没有模型路由时归成 no-route：说成「模型没出力」会让人去查模型', async () => {
+  // 宿主没配 provider/model、agent 也拿不出路由时，插件**根本没发出调用**。这一类必须
+  // 单独报，否则用户按「模型没出力」去查模型，那里什么都没有。
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  const handler = listeners.get('agent/pre-step')
+  const msg = message([{ type: 'text', text: '帮我写个脚本' }])
+  const decision = { kind: 'enter', messages: [msg] }
+  await handler({ agent: undefined, messages: [msg], turn: 1, step: 1 }, async () => decision)
+
+  assert.equal(llm.calls.length, 0, '没有路由，一次都不该调模型')
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastIssue.kind, 'no-route')
+  assert.ok(/route/.test(stats.lastIssue.error), `原文要留着，便于排查：${stats.lastIssue.error}`)
+  assert.equal(stats.lastSource, 'rules-fallback')
+})
+
+test('规则也改不动的时候：原话原样发出，但提示照弹（`!!` 撞上本来就够硬）', async () => {
+  // `!!` 是"我知道它看着已经够硬，也要改"，所以它绕过 pre-step 那道 looksHardman 跳过；
+  // 可模型挂掉之后轮到规则兜底，兜底**同样认**这条已经够硬 —— 于是一个字都没改。
+  // 这一条于是按剥掉前缀的原话发出去，但确实出过事，toast 仍然要弹。
+  const hardman = '老哥们，搞快点，肌肉集团冲冲冲！'
+  const llm = makeBrokenLlm('boom')
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  const out = await runPreStep(listeners, message([{ type: 'text', text: `!! ${hardman}` }]))
+  assert.equal(out.messages[0].content[0].text, hardman, '规则也改不动 ⇒ 按剥掉前缀的原话发出')
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastIssue.kind, 'llm-failed', '出过事就要留证据，toast 靠它弹')
+  assert.equal(stats.rewrites || 0, 0, '一个字都没改，不该算一次改写')
+})
+
 test('用户撤回的回合归成 aborted：不许栽赃给模型', async () => {
   const llm = makeSilentAbortLlm()
   const { ctx, listeners } = makeCtx(llm)

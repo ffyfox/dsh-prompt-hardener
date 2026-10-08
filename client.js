@@ -113,9 +113,10 @@ window.__ModuleLoader__.load({
         sendOriginal: '按原文发出',
         retry: '重试',
         cancel: '撤回',
-        toastTimeout: '改写超时，这一条走了规则兜底',
-        toastFailed: '模型没出力，这一条走了规则兜底',
-        toastDismiss: '知道了',
+        toastTimeout: '改写超时，本条走规则兜底',
+        toastFailed: '模型返回空流 / 报错，本条走规则兜底',
+        toastNoRoute: '没有可用模型路由，本条走规则兜底',
+        toastDismiss: '确定',
       },
       en: {
         label: 'Muscle',
@@ -148,8 +149,9 @@ window.__ModuleLoader__.load({
         retry: 'Retry',
         cancel: 'Withdraw',
         toastTimeout: 'The rewrite timed out; this one went through the rule-based fallback',
-        toastFailed: 'The model gave nothing; this one went through the rule-based fallback',
-        toastDismiss: 'Dismiss',
+        toastFailed: 'The model returned nothing or errored; this one went through the rule-based fallback',
+        toastNoRoute: 'No model route available; this one went through the rule-based fallback',
+        toastDismiss: 'OK',
       },
     }
 
@@ -451,6 +453,19 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
     const TOAST_KEY = '__PROMPT_HARDENER_TOASTS__'
 
     /**
+     * 事故种类 → 标题文案的键。
+     *
+     * 三种分开是有用的：`timeout` 是插件自己掐的、`no-route` 根本没调到模型（宿主没配
+     * provider/model，或者压根没装 llm 服务），把后者说成"模型没出力"是归错了人 ——
+     * 用户按那句话去查模型，查不出任何东西。
+     */
+    const TOAST_TITLE = Object.freeze({
+      timeout: 'toastTimeout',
+      'no-route': 'toastNoRoute',
+      'llm-failed': 'toastFailed',
+    })
+
+    /**
      * 浏览器半边**这次**加载的时刻。
      *
      * stats 是落在盘上的：上一次运行留下的 `lastIssue` 会在重启后原样读回来，而
@@ -531,7 +546,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
       // 用户自己撤回的回合：确实没改写成功，但那是用户按的，没什么可提示的 ——
       // 弹一条「模型没出力」等于把责任推给模型。水位线照样推进，免得以后翻旧账。
       if (issue.kind === 'aborted') return null
-      const kind = issue.kind === 'timeout' ? 'timeout' : 'llm-failed'
+      // 只认认得的三种；宿主将来多报一种也不至于弹出一条张冠李戴的提示。
+      const kind = issue.kind in TOAST_TITLE ? issue.kind : 'llm-failed'
       return pushToast({ kind, detail: typeof issue.error === 'string' ? issue.error : '' })
     }
 
@@ -619,7 +635,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
             className: 'ph-toast',
             role: 'status',
           },
-          h('div', { className: 'ph-toast-title' }, item.kind === 'timeout' ? t('toastTimeout') : t('toastFailed')),
+          h('div', { className: 'ph-toast-title' }, t(TOAST_TITLE[item.kind] || 'toastFailed')),
           item.detail ? h('div', { className: 'ph-toast-detail' }, item.detail) : null,
           h('div', { className: 'ph-toast-actions' },
             h('button', {

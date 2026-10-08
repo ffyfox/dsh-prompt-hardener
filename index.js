@@ -537,7 +537,10 @@ function reviewRoute(ctx, configured) {
  * 宿主的模型服务会把这次中断**消化成一个空流**，插件这边只剩下"没有吐文本"。按错误
  * 字符串猜，就会把超时报成「模型没出力」—— 用户看到的 toast 说的不是真实原因。
  *
- * @param {string} kind `timeout` | `aborted` | `llm-failed`。
+ * `no-route` 走的不是信号，而是**根本没发出调用**：宿主没配 provider/model，或者压根
+ * 没装 llm 服务。它也单列一类 —— 说成「模型没出力」会让人去查模型，那里什么都没有。
+ *
+ * @param {string} kind `timeout` | `aborted` | `no-route` | `llm-failed`。
  * @param {string} message 给人看的原文。
  * @returns {Error} 带 `phKind` 的错误。
  */
@@ -557,14 +560,14 @@ function llmFailure(kind, message) {
  */
 async function llmRewrite(ctx, agent, text, options) {
   const llm = typeof ctx.get === 'function' ? ctx.get('llm') : null
-  if (!llm || typeof llm.stream !== 'function') throw new Error('llm service unavailable')
+  if (!llm || typeof llm.stream !== 'function') throw llmFailure('no-route', 'llm service unavailable')
 
   const configured = options.llm ?? {}
   const route = resolveRoute(agent, configured)
   const provider = route.provider
   const model = route.model
   if (!provider || !model) {
-    throw new Error('no provider/model route available: set llm.provider + llm.model, or send the first message after the session has a logged route')
+    throw llmFailure('no-route', 'no provider/model route available: set llm.provider + llm.model, or send the first message after the session has a logged route')
   }
 
   const timeoutMs = configured.timeoutMs > 0 ? configured.timeoutMs : DEFAULTS.llm.timeoutMs
@@ -634,7 +637,7 @@ async function llmRewrite(ctx, agent, text, options) {
  * @returns {Promise<{ text: string, changed: boolean, source: string|null, error: string|null,
  *   errorKind: string|null, meta: object|null }>}
  *          `changed: false` 表示连规则兜底都没能改动它（调用方按"原样放行"处理）；
- *          `errorKind` 是失败归因（`timeout` / `aborted` / `llm-failed`），供 toast 说对话。
+ *          `errorKind` 是失败归因（`timeout` / `aborted` / `no-route` / `llm-failed`），供 toast 说对话。
  */
 async function rewriteText(ctx, agent, text, options) {
   let candidate = null
