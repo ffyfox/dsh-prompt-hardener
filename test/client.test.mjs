@@ -395,6 +395,112 @@ test('审查相关的文案中英双语都得在', () => {
   }
 })
 
+test('英文语言域下，卡片与面板里不许再出现中文与全角标点', () => {
+  // 这类漏译没有任何一处会抛：界面照样画出来，只是一个字都不认识的人在读中文。
+  // 曾经有三处 `en` 值是直接抄了 `zh`（面板标题、副标题、行标签），卡片那两行的
+  // 分隔符还是拼接时写死的全角冒号。所以这里**拿 en 字典真渲染一遍**再扫字符。
+  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
+  const module = registered.factory(() => ReactStub)
+  let entry = null
+  let dict = null
+  const ctx = {
+    effect(fn) {
+      const dispose = fn()
+      return () => {
+        if (typeof dispose === 'function') dispose()
+      }
+    },
+    locale: {
+      register: (_ns, value) => {
+        dict = value
+        return () => {}
+      },
+      bind: () => (key) => (dict && dict.en && typeof dict.en[key] === 'string' ? dict.en[key] : key),
+    },
+    slots: {
+      inject: (_owner, cb) => cb(),
+      register: (options, Component) => {
+        if (options.name === 'conversation.input.left') entry = { options, Component }
+        return () => {}
+      },
+    },
+  }
+  module.apply(ctx)
+
+  const bag = module.__internals.holdBag()
+  const props = { sessionId: 's-en', inputActions: { submit() {}, setDraft() {} } }
+
+  // 卡片：就绪态与失败态各渲染一遍（失败态多出"改写失败 + 原因"那一行）。
+  for (const phase of [
+    { phase: 'ready', source: 'llm', error: '' },
+    { phase: 'error', source: null, error: 'llm produced no text' },
+  ]) {
+    bag.byId = {}
+    module.__internals.writeHold('s-en', {
+      id: module.__internals.nextHoldId(),
+      original: 'write me a script',
+      text: 'Alright brother!',
+      ...phase,
+    })
+    const texts = textsOf(entry.Component(props)).join(' | ')
+    assert.ok(!CJK.test(texts), `en 的卡片里还有中文/全角标点：${texts}`)
+    assert.ok(texts.includes('Original: write me a script'), `标签分隔符没跟语言走：${texts}`)
+  }
+
+  // 面板（含药丸的悬停提示：它也走同一个 `title` 键）。
+  bag.byId = {}
+  ReactStub.__forceOpenOnce = true
+  const panelTree = entry.Component(props)
+  ReactStub.__forceOpenOnce = false
+  const panelTexts = textsOf(panelTree).join(' | ')
+  assert.ok(!CJK.test(panelTexts), `en 的面板里还有中文/全角标点：${panelTexts}`)
+  const pill = findNode(panelTree, (node) => node.props && node.props.className === 'ph-pill')
+  assert.ok(pill, '找不到药丸')
+  assert.ok(!CJK.test(String(pill.props.title)), `药丸悬停提示还是中文：${pill.props.title}`)
+
+  // 状态提示那一条（第三个界面：shell.overlay 上的 toast）。
+  const toastBag = module.__internals.toastBag()
+  const Stack = module.__internals.makeToastStack((key) => (dict.en[key] || key))
+  for (const kind of ['timeout']) {
+    toastBag.items = []
+    toastBag.seenAt = 0
+    module.__internals.pushToast({ kind, detail: 'AbortError: timed out' })
+    const toastTexts = textsOf(Stack({})).join(' | ')
+    assert.ok(!CJK.test(toastTexts), `en 的提示条（${kind}）里还有中文/全角标点：${toastTexts}`)
+  }
+  toastBag.items = []
+
+  // 反过来守一下：别顺手把中文那半边也翻译没了。
+  for (const key of ['title', 'hint', 'level']) {
+    assert.ok(CJK.test(module.__internals.DICT.zh[key]), `zh 的 ${key} 不该被改掉`)
+  }
+
+  // 副标题必须**一行装得下**。面板那一行的可用宽度是 **340px**：`.ph-panel` 写的是
+  // `width: 340px` 且没声明 box-sizing ⇒ 那是**内容**宽，padding 与 border 加在它之外
+  // （整框 366px）。这两条都拿真机截图量过：面板 bbox 722 图 px ÷ 366 = 1.97×，文字左边
+  // 距 25 图 px = 13 CSS × 1.97，副标题墨迹 652 图 px ÷ 1.97 = 330px。
+  //
+  // 字宽按 **Liberation Sans**（Arial 度量）估：本机 Chromium 从 DSH 的字体栈里实际取到的
+  // 就是它（`-apple-system`…`Helvetica Neue` 都缺，落到 `Helvetica` → fontconfig → Liberation；
+  // Chromium 并不认 `Segoe UI` → Adwaita 这种别名）。系数是拿真实字符串最小二乘拟合的，
+  // 在这一类文案上偏差约 ±3%。全角字较特殊：字宽精确等于 1em（与字体无关），单独按 1em 计。
+  const lineEm = 340 / 12
+  const widthEm = (text) => [...text].reduce((sum, ch) => {
+    if (/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/.test(ch)) return sum + 1
+    if (ch === ' ') return sum + 0.2282
+    if (ch === '!') return sum + 0.3243
+    if (ch === ch.toUpperCase() && ch !== ch.toLowerCase()) return sum + 0.7313
+    return sum + 0.4595
+  }, 0)
+  for (const lang of ['zh', 'en']) {
+    const hint = module.__internals.DICT[lang].hint
+    assert.ok(widthEm(hint) <= lineEm,
+      `${lang} 的副标题一行装不下（估宽 ${widthEm(hint).toFixed(1)}em > ${lineEm.toFixed(1)}em = 340px）：${hint}`)
+  }
+
+  bag.byId = {}
+})
+
 /* ─────────────── 审查态：window 上的袋子是唯一真相 ─────────────── */
 
 const internals = registered.factory(() => ReactStub).__internals

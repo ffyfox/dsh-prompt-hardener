@@ -102,6 +102,8 @@ window.__ModuleLoader__.load({
         rewriting: '改写中…',
         fromRules: '模型没出力，这是规则兜底',
         originalLabel: '原文',
+        /** 标签与内容之间的分隔符。中文用全角冒号，英文用半角的 `: `。 */
+        sep: '：',
         failed: '改写失败',
         timeout: '45 秒没等到宿主的回音（宿主没在跑，或者这一步卡住了）',
         interrupted: '插件刚重载过，这次改写中断了。重试，或者按原文发出',
@@ -117,9 +119,9 @@ window.__ModuleLoader__.load({
       },
       en: {
         label: 'Muscle',
-        title: '硬邦邦！！！',
-        hint: '按！提示词！把！需求！全量重写！看得！硬邦邦！！！！',
-        level: '硬度',
+        title: 'Muscle!!!',
+        hint: 'Rewrites! your! prompt! top! to! bottom! until! ROCK! HARD!!!!',
+        level: 'Hardness',
         off: 'Off',
         light: 'Light',
         standard: 'Medium',
@@ -131,10 +133,11 @@ window.__ModuleLoader__.load({
         review: 'Review',
         autoHint: 'Auto: sends right away; the rewrite happens after the send (the old behaviour)',
         reviewHint: 'Review: opens a card first — read it, edit it, then send',
-        reviewTitle: 'Muscle review！！！',
+        reviewTitle: 'Muscle review!!!',
         rewriting: 'Rewriting…',
         fromRules: 'The model gave nothing; this is the rule-based fallback',
         originalLabel: 'Original',
+        sep: ': ',
         failed: 'Rewrite failed',
         timeout: 'no answer from the host within 45s (the host is not running, or this step stalled)',
         interrupted: 'The plugin just reloaded, so this rewrite was interrupted. Retry, or send the original',
@@ -1195,10 +1198,10 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
             h('div', { className: 'ph-cardtitle' },
               h('span', null, t('reviewTitle')),
               badge ? h('span', { className: 'ph-badge' }, badge) : null),
-            h('div', { className: 'ph-orig' }, `${t('originalLabel')}：${mine.original}`),
+            h('div', { className: 'ph-orig' }, `${t('originalLabel')}${t('sep')}${mine.original}`),
             mine.phase === 'error' && (mine.error || mine.reason === 'interrupted')
               ? h('div', { className: 'ph-err' },
-                `${t('failed')}：${mine.reason === 'interrupted' ? t('interrupted') : mine.error}`)
+                `${t('failed')}${t('sep')}${mine.reason === 'interrupted' ? t('interrupted') : mine.error}`)
               : null,
             h('textarea', {
               className: 'ph-edit',
