@@ -94,7 +94,7 @@ test('isTypedByUser 只认用户亲手打的字', () => {
   assert.equal(isTypedByUser(null), false)
 })
 
-test('sanitizeState 收敛坏数据，并丢掉已废弃的字段', () => {
+test('sanitizeState 收敛坏数据，并丢掉表外的字段', () => {
   const state = sanitizeState({
     enabled: 'yes',
     intensity: '离谱',
@@ -110,9 +110,9 @@ test('sanitizeState 收敛坏数据，并丢掉已废弃的字段', () => {
   assert.equal(state.llm.maxTokens, DEFAULTS.llm.maxTokens)
   assert.equal(state.llm.timeoutMs, DEFAULTS.llm.timeoutMs)
   assert.equal(state.revision, 5)
-  assert.equal('turnMode' in state, false, '轮次语气选项已删除')
-  assert.equal('keepOriginal' in state, false, '原话保留选项已删除')
-  assert.equal('enabled' in state.llm, false, 'LLM 开关已删除：它现在是唯一路径')
+  assert.equal('turnMode' in state, false, '状态里不该有 turnMode')
+  assert.equal('keepOriginal' in state, false, '状态里不该有 keepOriginal')
+  assert.equal('enabled' in state.llm, false, 'llm.enabled 不该存在：LLM 是唯一路径')
 })
 
 test('sanitizeState 保留合法值', () => {
@@ -185,12 +185,10 @@ test('改名迁移：两个目录都没有时什么都不做（全新安装）',
   }
 })
 
-test('回归：迁移必须排在激活信标之前（真机实测踩到的那条乱序）', async () => {
-  // 这条在假 ctx 上原本看不见：假的 `effect` 是当场跑回调的，真 cordis 会延后。
-  // 延后之后 enter 信标（它要 mkdir 数据目录）就可能先落地，而迁移一旦看见"新目录
-  // 已经在用"就收手 —— 于是谁先谁后只取决于微任务怎么排，信标里那句 dataMigration
-  // 也就不再是"这次到底迁了没"的可靠记录。
-  // 所以这里把 effect 也做成延后的，把顺序钉死成显式的 await。
+test('迁移必须排在激活信标之前', async () => {
+  // 信标要 `mkdir` 数据目录：它先落地的话，迁移看见"新目录已经在用"就收手，信标里那句
+  // dataMigration 也就不再是"这次到底迁了没"的可靠记录。真 cordis 的 `effect` 是延后跑的，
+  // 所以这里把 effect 也做成延后的，把顺序钉成显式的 await。
   const before = process.env.DSH_HOME
   const home = await mkdtemp(join(tmpdir(), 'ph-order-'))
   process.env.DSH_HOME = home
@@ -216,10 +214,9 @@ test('回归：迁移必须排在激活信标之前（真机实测踩到的那�
   }
 })
 
-test('重复实例化（真机上插件被应用两次）：数据不许漏在原地，信标也要说人话', async () => {  // 2026-10-02 真机实测：插件被应用了两次，第二次的信标写着 `dataMigration: none`，
-  // 看起来像"迁移没跑、用户数据被落在原地了"，其实第一次早就迁完了 —— 是**报告**在误导人。
-  // 现在 `in-use`（有新目录了）和 `none`（压根没旧目录）分开，再配上 legacyLeftover，
-  // 一眼就能分清"有人先动过手"和"真的漏了"。
+test('重复实例化（插件被应用两次）：数据不许漏在原地，信标也要说人话', async () => {
+  // 第二次实例化时信标必须说实话：`in-use`（新目录已经在用）和 `none`（压根没旧目录）
+  // 是两件事，配上 legacyLeftover 才能分清"有人先动过手"和"真的漏了"。
   const before = process.env.DSH_HOME
   const home = await mkdtemp(join(tmpdir(), 'ph-migrate-twice-'))
   process.env.DSH_HOME = home
@@ -281,10 +278,8 @@ test('播种后走外部文件，且改文件后立即生效', async () => {
  * 造一个够用的假 cordis 上下文，并把注册的事件监听器抓出来。
  *
  * 这里的"够用"有一条硬要求：**服务没就绪时裸访问必须抛**，和真 cordis 一样
- * （`cannot get property "X" without inject`）。以前的假 ctx 不会抛，于是
- * "冷启动时 webServer 晚于本插件就绪"这个真实时序在全部测试里一个都没拦住 ——
- * 插件里一句 `ctx.webServer` 就让控制条报 405，测试却全绿。假件比现实宽容，
- * 就是测试失效的原因，所以这里用 Proxy 把真语义补上。
+ * （`cannot get property "X" without inject`）。假件若比现实宽容，"冷启动时 webServer
+ * 晚于本插件就绪"这个时序就一条都拦不住 —— 这里用 Proxy 把真语义补上。
  *
  * @param llm 假 llm 服务。
  * @param options.webServer `'ready'`（默认，激活时已就绪）| `'later'`（激活后才就绪）| `'never'`（宿主没有）。
@@ -407,6 +402,34 @@ function makeBrokenLlm(reason) {
 }
 
 /**
+ * 假 llm：像**真机上的宿主**那样，被掐断时既不抛错也不吐字，直接把流结束掉。
+ *
+ * 插件用自己的 `AbortSignal.timeout` 掐断调用后，宿主把这次中断消化成一个空流，插件这边
+ * 只剩 "llm produced no text"。照错误字符串猜归因就会把超时报成「模型没出力」——
+ * 所以这个形状必须有用例钉着。
+ */
+function makeSilentAbortLlm() {
+  return {
+    calls: 0,
+    async *stream(options) {
+      this.calls += 1
+      await new Promise((resolve) => {
+        const signal = options.signal
+        if (!signal) {
+          setTimeout(resolve, 5)
+          return
+        }
+        if (signal.aborted) {
+          resolve()
+          return
+        }
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    },
+  }
+}
+
+/**
  * 起一个插件实例：先清掉状态文件。
  * `apply` 的 load() 会用状态文件覆盖 row config 的默认值（那是设计使然 —— config 只是
  * 出厂默认，用户选择优先），所以用例之间必须隔离持久化状态。
@@ -420,11 +443,11 @@ async function boot(ctx, config) {
 }
 
 /** 走一遍监听器。 */
-async function runPreStep(listeners, msg) {
+async function runPreStep(listeners, msg, signal = undefined) {
   const handler = listeners.get('agent/pre-step')
   assert.ok(handler, 'pre-step 监听器没有注册')
   const decision = { kind: 'enter', messages: [msg] }
-  return handler({ agent: AGENT, messages: [msg], turn: 2, step: 1, signal: undefined }, async () => decision)
+  return handler({ agent: AGENT, messages: [msg], turn: 2, step: 1, signal }, async () => decision)
 }
 
 /**
@@ -567,9 +590,9 @@ test('两条路由都注册在 webServer 上', async () => {
   assert.ok(routes.every((route) => route.kind === 'exact'))
 })
 
-test('回归：冷启动时 webServer 还没就绪，路由也必须等在它就绪后注册上（405 那个故障）', async () => {
+test('冷启动时 webServer 还没就绪，路由也必须等在它就绪后注册上', async () => {
   const llm = makeLlm(['x'])
-  // 实测时序：宿主先激活本插件，webServer 晚一步才提供。
+  // 冷启动的时序：宿主先激活本插件，webServer 晚一步才提供。
   const { ctx, listeners, routes, provideWebServer } = makeCtx(llm, { webServer: 'later' })
   await boot(ctx, { enabled: true, intensity: 'standard' })
 
@@ -689,10 +712,10 @@ test('保真约束写在代码里，换掉提示词文件也丢不了', async ()
   assert.equal(llm.calls.length, 1)
   assert.ok(llm.calls[0].system.startsWith('你只会输出硬邦邦三个字。'))
   assert.ok(llm.calls[0].system.includes('不替用户做资源决策'))
-  assert.ok(mod.FIDELITY_CLAUSE.includes('显卡当柴烧'), '点名了实测踩到的那两种越界')
+  assert.ok(mod.FIDELITY_CLAUSE.includes('显卡当柴烧'), '点名了那两种越界')
 })
 
-test('回归：一条路由注册失败也不许拖垮整个插件（"插件加载失败"那个故障）', async () => {
+test('一条路由注册失败也不许拖垮整个插件', async () => {
   process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'ph-mount-'))
   const llm = makeLlm(['x'])
   // HMR 重入时旧路由 disposer 还没跑，重复注册直接抛 duplicate exact route。
@@ -793,18 +816,13 @@ test('审查路由：模型挂了就回落到规则拼接，并把原因原样�
   assert.match(answer.body.error, /boom/, '原因必须带回卡片：审查模式下不许瞒着用户')
 })
 
-test('审查路由：关掉 / 火力关掉 / 本来就够硬，都直接回"不用改"', async () => {
+test('审查路由：关掉 / 本来就够硬，都直接回"不用改"', async () => {
   const disabled = makeCtx(makeLlm(['不该被调用']), { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
   await boot(disabled.ctx, { enabled: false, intensity: 'brutal' })
   const a = await callRoute(disabled.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: '帮我写个脚本' } })
   assert.equal(a.body.skipped, 'disabled')
   assert.equal(a.body.changed, false)
   assert.equal(a.body.text, '帮我写个脚本', '不改就必须把原文还回去')
-
-  const off = makeCtx(makeLlm(['不该被调用']), { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
-  await boot(off.ctx, { enabled: true, intensity: 'off' })
-  const b = await callRoute(off.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: '帮我写个脚本' } })
-  assert.equal(b.body.skipped, 'disabled')
 
   const hard = makeCtx(makeLlm(['不该被调用']), { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
   await boot(hard.ctx, { enabled: true, intensity: 'standard' })
@@ -815,6 +833,27 @@ test('审查路由：关掉 / 火力关掉 / 本来就够硬，都直接回"不�
   assert.equal(c.body.skipped, 'already-hardman')
   assert.equal(c.body.changed, false)
   assert.equal(hard.routes.length > 0, true)
+})
+
+test('老配置里的 `intensity:off` 翻成"整体停用"', async () => {
+  // `off` 是"插件开着但不改写"，用户在界面上造不出来（挂件那颗「关」写的是 enabled:false），
+  // 老配置读到就翻译成 enabled:false，语义不变。
+  const sanitized = mod.sanitizeState({ intensity: 'off', enabled: true })
+  assert.equal(sanitized.enabled, false, 'off 的老配置必须落成停用')
+  assert.equal(sanitized.intensity, 'standard', '强度回落出厂值，不再是 off')
+
+  // 大写、带空白也认（跟 normalizeIntensity 一样的收敛口径）。
+  assert.equal(mod.sanitizeState({ intensity: ' off ' }).enabled, false)
+  assert.equal(mod.sanitizeState({ intensity: 'light' }).intensity, 'light')
+  assert.equal(mod.sanitizeState({ intensity: 'light' }).enabled, true)
+
+  // 走一遍真机路径：老状态文件里的 off 读进来之后，插件一个字节都不动。
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'off' })
+  const out = await runPreStep(listeners, message([{ type: 'text', text: '!! 帮我写个脚本' }]))
+  assert.equal(llm.calls.length, 0)
+  assert.equal(out.messages[0].content[0].text, '!! 帮我写个脚本', '整体停用连暗号都不解释')
 })
 
 test('审查路由：空正文与不认识的方法都被挡掉', async () => {
@@ -883,7 +922,7 @@ test('放行登记不跨实例：HMR 换了实例，旧登记不生效', async (
   assert.equal(out.messages[0].content[0].text, '改写结果', '新实例不认旧实例的登记')
 })
 
-/* ─────────────────── 触发前缀：半角全角一律要自成一段 ─────────────────── */
+/* ─────────────────────────── 触发前缀 ─────────────────────────── */
 
 /** 等一小会儿，让 `persist()` 把统计落盘。 */
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -973,6 +1012,53 @@ test('审查路由上的触发前缀：回给卡片的是剥掉暗号那份，!!
   assert.equal(forceLlm.calls[0].messages[0].content[0].text, hardman, '暗号不许进模型')
 })
 
+test('模型失败时留下 lastIssue，浏览器半边据此弹一次提示', async () => {
+  const llm = makeBrokenLlm('boom')
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]))
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastError, 'boom')
+  assert.equal(stats.lastSource, 'rules-fallback')
+  assert.equal(stats.lastIssue.kind, 'llm-failed')
+  assert.equal(stats.lastIssue.error, 'boom')
+  assert.equal(typeof stats.lastIssue.at, 'number', '浏览器半边靠这个时间戳判断"这是不是新出的事"')
+})
+
+/* ──────────── 失败归因：靠信号，不靠错误字符串 ──────────── */
+
+test('超时归因：宿主把中断消化成空流，也要认成 timeout', async () => {
+  // `llm.timeoutMs: 1` 时插件自己掐断调用，宿主不抛错、只回一个空流。照错误字符串猜归因，
+  // `lastIssue.kind` 会落成 llm-failed，toast 于是说「模型没出力」。
+  const llm = makeSilentAbortLlm()
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard', llm: { timeoutMs: 1 } })
+
+  await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]))
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(llm.calls, 1)
+  assert.equal(stats.lastIssue.kind, 'timeout')
+  assert.ok(/timed out/.test(stats.lastIssue.error), `文案要自己说清是超时：${stats.lastIssue.error}`)
+  assert.equal(stats.lastSource, 'rules-fallback')
+})
+
+test('用户撤回的回合归成 aborted：不许栽赃给模型', async () => {
+  const llm = makeSilentAbortLlm()
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]), AbortSignal.abort())
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastIssue.kind, 'aborted')
+  assert.equal(stats.lastSource, 'rules-fallback')
+})
+
+/* ─────────────────── 触发前缀：半角全角一律要自成一段 ─────────────────── */
+
 test('全角前缀也要自成一段：紧贴不算暗号，隔了空白才算', async () => {
   // 紧贴：`？？这句原样发出去` 就是一条普通消息，一个字都不许吃。
   const gluedRaw = '？？这句原样发出去'
@@ -1055,11 +1141,10 @@ test('审查路由同样只认自成一段的暗号（全角紧贴当原文）',
   assert.equal(forceLlm.calls[0].messages[0].content[0].text, hardman, '全角暗号不许进模型')
 })
 
-test('回归：迁移过来的设置必须真的被读进来，不许被出厂默认覆盖写掉', async () => {
-  // 真机实测踩到（2026-10-02）：迁移和"读状态文件"是同时起跑的，而迁移是异步改名。
-  // 读盘那一刻新路径上还是空的 ⇒ 读到 ENOENT ⇒ 内存里是**出厂默认**（intensity=standard、
-  // mode=auto）。用户自己选的档位与审查模式就此消失，而且第一轮统计一写盘还会把
-  // 默认值**落回**状态文件，等于把用户的设置覆盖掉。
+test('迁移过来的设置必须真的被读进来，不许被出厂默认覆盖写掉', async () => {
+  // 迁移是异步改名：`load()` 不等它，读盘那一刻新路径上还是空的 ⇒ 读到 ENOENT ⇒
+  // 内存里是**出厂默认**（intensity=standard、mode=auto）。用户自己选的档位与审查模式
+  // 就此消失，而且第一轮统计一写盘还会把默认值**落回**状态文件，等于把设置覆盖掉。
   // 所以 `load()` 必须等迁移跑完。
   const before = process.env.DSH_HOME
   const home = await mkdtemp(join(tmpdir(), 'ph-migrate-state-'))
@@ -1114,9 +1199,9 @@ test('迁移：目标只剩个空壳目录时也要把数据搬过来（Windows 
 })
 
 test('状态路由：stats 按字段合并，不许整体替换（一次探针不能抹掉全部计数器）', async () => {
-  // 2026-10-02 实测踩到：为了写一个诊断字段发 `{stats:{probeStage}}`，结果宿主的
-  // rewrites / reviewCalls 全被抹平了 —— 因为状态路由对 `stats` 是整体替换。
-  // 计数器之间互不相关，调用方只会想更新其中一个，所以必须是合并。
+  // 为了写一个诊断字段发 `{stats:{probeStage}}`，若状态路由对 `stats` 是整体替换，
+  // rewrites / reviewCalls 就会被一起抹平。计数器之间互不相关，调用方只会想更新其中
+  // 一个，所以必须是合并。
   const { ctx, routes } = makeCtx(makeLlm(['x']))
   await boot(ctx, { enabled: true, intensity: 'standard' })
 

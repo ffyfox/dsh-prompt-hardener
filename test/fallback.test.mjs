@@ -19,13 +19,6 @@ test('兜底结果里原话一字不差', () => {
   assert.ok(result.text.includes('任务：'))
 })
 
-test('火力 off 不动文本', () => {
-  const result = assembleFallback(ORIGINAL, { intensity: 'off' })
-  assert.equal(result.changed, false)
-  assert.equal(result.text, ORIGINAL)
-  assert.equal(result.meta.skipped, 'intensity-off')
-})
-
 test('已经是硬汉风格就放行，不二次套娃', () => {
   const hardman = '老哥们，我时间不多了，搞快点！别引入墨迹的独立审查，你们是肌肉集团，冲冲冲！'
   assert.equal(looksHardman(hardman), true)
@@ -84,16 +77,15 @@ test('强度档位收敛', () => {
   assert.equal(normalizeIntensity('INSANE'), 'insane')
   assert.equal(normalizeIntensity('离谱'), 'standard')
   assert.equal(normalizeIntensity(undefined), 'standard')
+  // `off` 不是强度档位：它是个未知值，按收敛规则落回 standard；
+  // 老配置里那个字由 sanitizeState 翻成"整体停用"。
+  assert.equal(normalizeIntensity('off'), 'standard')
   for (const id of INTENSITIES) assert.equal(normalizeIntensity(id), id)
 })
 
 test('每个合法强度都产出比原文长的结果', () => {
   for (const intensity of INTENSITIES) {
     const result = assembleFallback(ORIGINAL, { intensity, seed: `s-${intensity}` })
-    if (intensity === 'off') {
-      assert.equal(result.changed, false)
-      continue
-    }
     assert.equal(result.changed, true, `${intensity} 应当改写`)
     assert.ok(result.text.length > ORIGINAL.length, `${intensity} 应当比原文长`)
   }

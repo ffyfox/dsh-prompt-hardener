@@ -38,11 +38,37 @@ window.__ModuleLoader__.load({
     const MODES = ['auto', 'review']
 
     /**
+     * 一条 toast 活多久（毫秒）。
+     *
+     * 6 秒是"够看清一句话、又不至于赖着不走"的长度：它只在改写出事时出现，
+     * 而那时候用户多半正盯着对话看下一条回复。
+     */
+    const TOAST_HOLD_MS = 6000
+
+    /**
+     * 卡片延迟露面（毫秒）。
+     *
+     * 宿主的审查路由对"这次不用审"的回答是**秒回**的（命中 `??` 放行、消息本来就够硬）：
+     * 卡片要是当场弹出来，下一秒就被收掉，用户只看到一道闪。所以先压着不显示 —— 抢在这段
+     * 时间之内回来的答案压根不会弹卡片；真正的改写要几秒，卡片照样在等待期间就在屏幕上。
+     *
+     * 50ms 这个数是**在渲染进程里量出来的**，不是拍脑袋：加载时叠着打 20 次那条秒回的路，
+     * 往返 median 4ms / p90 7ms / max 10ms（裸 curl 量到的 0.7ms 只是服务端那一半，不算数）；
+     * 定时器本身的迟到量 median 0 / max 3ms，而迟到只会让卡片更晚露面，是安全方向的余量。
+     * 所以 50ms = 最坏样本的 5 倍（约 3 帧）。再往上（120ms、400ms）用户按完回车就能
+     * 感觉到卡片"来得慢"。
+     *
+     * 会有跑输的时候：真机上撞到过一次 2.7 秒的尖峰（主线程被占住），那种情况下卡片照常
+     * 弹出来 —— 这是对的，不然用户干等几秒却看不到任何反馈。延迟只保证"秒回的不闪"。
+     */
+    const CARD_DELAY_MS = 50
+
+    /**
      * 审查请求的客户端超时。
      *
      * 宿主的模型调用自己有 30 秒上限，这里留出余量；超过就当作"没人回音"落到失败态。
      * 没有这道闸的话，请求一旦卡住（路由没注册、服务僵住），卡片会**永远**停在"改写中"，
-     * 用户除了关掉它没有任何出路 —— 真机上踩到过。
+     * 用户除了关掉它没有任何出路。
      */
     const REVIEW_TIMEOUT_MS = 45000
 
@@ -85,6 +111,9 @@ window.__ModuleLoader__.load({
         sendOriginal: '按原文发出',
         retry: '重试',
         cancel: '撤回',
+        toastTimeout: '改写超时，这一条走了规则兜底',
+        toastFailed: '模型没出力，这一条走了规则兜底',
+        toastDismiss: '知道了',
       },
       en: {
         label: 'Muscle',
@@ -115,6 +144,9 @@ window.__ModuleLoader__.load({
         sendOriginal: 'Send original',
         retry: 'Retry',
         cancel: 'Withdraw',
+        toastTimeout: 'The rewrite timed out; this one went through the rule-based fallback',
+        toastFailed: 'The model gave nothing; this one went through the rule-based fallback',
+        toastDismiss: 'Dismiss',
       },
     }
 
@@ -144,9 +176,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
 /* 药丸按输入框那一排官方控件的规格来。规格是量出来的，不是猜的：
    dsh-client-ui-model-selection/lib/ModelSelect.module.css 里紧挨着它的模型选择器是
    高 28px、border:none、背景透明、圆角 var(--dsw-radius-sm)（=8px）、悬停 interactive-bg-hover。
-   我们原来是 1px 描边 + 13px 胶囊，在同一排里比邻居"立体"，所以去掉描边、顺齐圆角。
-   注意 box-sizing：原来 26px 高 + 上下各 1px 描边 = 28px 总高；描边一去，若不显式声明
-   border-box 就会塌成 26px，与旁边控件错位。 */
+   规格：高 28px、无描边、背景透明、圆角与邻居一致。
+   box-sizing 不能省：高度按 28px 声明，若让内边距在它之外额外撑开，就会与旁边控件错位。 */
 .ph-pill {
   box-sizing: border-box;
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px;
@@ -207,8 +238,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
   color: var(--dsw-alias-label-tertiary); line-height: 1.55; margin-bottom: 8px;
   max-height: 56px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
-/* 92px 是原来"正文 + 下面那行字数统计"里的正文部分高度；字数统计整行删掉后，
-   把空出来的 34px（6 上边距 + 18 行高 + 10 下边距）还给输入框，卡片总高不变。 */
+/* 正文输入框的起步高度 126px（约五行），长到 260px 后自己滚。 */
 .ph-edit {
   display: block; width: 100%; box-sizing: border-box; min-height: 126px; max-height: 260px;
   resize: vertical; padding: 8px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2);
@@ -217,10 +247,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
 }
 .ph-edit:disabled { opacity: .6; }
 .ph-edit:focus { outline: 1px solid var(--dsw-alias-brand-primary); outline-offset: -1px; }
-/* 按钮行与正文输入框之间必须留出这段间隙。
-   曾经它是**零**：那时间隙是由下面那行字数统计的上下边距"顺带"提供的，
-   字数统计一删，输入框就和按钮贴死了（真机上肉眼可见的挤压感）。
-   所以这条 margin-top 不是装饰，是补回来的呼吸位，别再顺手删掉。 */
+/* 按钮行与正文输入框之间必须留出这段间隙：没有它输入框就与按钮贴死，卡片显得挤。
+   这条 margin-top 不是装饰，别再顺手删掉。 */
 .ph-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-top: 12px; }
 .ph-btn {
   height: 28px; padding: 0 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
@@ -243,6 +271,23 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
    这里多带一个类名让权重升一档（0,4,0），将来谁挪动规则顺序都不会再把它改坏。 */
 .ph-btn.ph-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
 .ph-err { color: var(--dsw-alias-label-error); line-height: 1.6; margin-bottom: 8px; word-break: break-word; }
+
+/* toast。挂在 shell.overlay —— 官方文档里那个位置的说明正好写着"a toast stack
+   belongs here"。那一层本身是点击穿透的，所以自己这一块要把指针事件收回来。 */
+.ph-toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 70;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  pointer-events: none;
+}
+.ph-toast {
+  pointer-events: auto; max-width: 380px; padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 22%); font-size: 12px; line-height: 1.6;
+}
+.ph-toast-title { color: var(--dsw-alias-label-error); font-weight: 600; margin-bottom: 2px; }
+.ph-toast-detail { color: var(--dsw-alias-label-tertiary); word-break: break-word; margin-bottom: 6px; }
+.ph-toast-actions { display: flex; justify-content: flex-end; }
 `
 
     /**
@@ -368,6 +413,220 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
       return typeof draft === 'string' ? draft : ''
     }
 
+    /**
+     * 卡片该不该在屏幕上。
+     *
+     * `hidden` 是"还压着不显示"（见 `CARD_DELAY_MS`）：宿主对"这次不用审"的回答是秒回的，
+     * 卡片当场弹出来只会闪一下，所以先压着。
+     *
+     * @param {object|null} hold 袋子里那份审查态。
+     * @returns {boolean}
+     */
+    function cardVisible(hold) {
+      return Boolean(hold) && hold.hidden !== true
+    }
+
+    /**
+     * 延迟露面到点了：只有"这张卡还在、而且还没露过面"才让它显示。
+     *
+     * @param {object|null} current 袋子里的审查态。
+     * @param {number} id 发起时那张卡的编号。
+     * @returns {object|null} 要让卡片显示的新状态；什么都不该做时返回 null。
+     */
+    function onReveal(current, id) {
+      if (!current || current.id !== id) return null
+      if (current.hidden !== true) return null
+      return { ...current, hidden: false }
+    }
+
+    /* ─────────────────────────── 状态提示（toast） ─────────────────────────── */
+    /**
+     * toast 的袋子。和审查卡片同一套做法（挂在 window 上 + 订阅者通知），理由也一样：
+     * **生产者在会话作用域、渲染者在 root 作用域**（`shell.overlay` 是 frame 级的），
+     * 而且 HMR 会把模块换成新实例 —— 只有 window 上那份在两个实例之间还是同一份。
+     */
+    const TOAST_KEY = '__PROMPT_HARDENER_TOASTS__'
+
+    /**
+     * 浏览器半边**这次**加载的时刻。
+     *
+     * stats 是落在盘上的：上一次运行留下的 `lastIssue` 会在重启后原样读回来，而
+     * `seenAt` 水位线在 window 上、页面一刷新就没了。没有这道闸，重启后的第一轮结束
+     * 会为几小时前那次失败弹一条提示 —— 而那句话是假的：用户看到的「这一条走了规则
+     * 兜底」说的根本不是这一条。宁可少说，也不能说错。
+     */
+    const LOADED_AT = Date.now()
+
+    /** toast 编号。 */
+    let toastSeq = 0
+
+    /** @returns {object} `{ items, subs, seenAt }`。 */
+    function toastBag() {
+      try {
+        let bag = window[TOAST_KEY]
+        if (!bag || typeof bag !== 'object') bag = window[TOAST_KEY] = {}
+        if (!Array.isArray(bag.items)) bag.items = []
+        if (!Array.isArray(bag.subs)) bag.subs = []
+        if (typeof bag.seenAt !== 'number') bag.seenAt = 0
+        return bag
+      } catch {
+        return { items: [], subs: [], seenAt: 0 }
+      }
+    }
+
+    /** 叫醒所有活着的订阅者。 */
+    function notifyToasts() {
+      for (const notify of toastBag().subs.slice()) {
+        try {
+          notify()
+        } catch {
+          /* 一个坏订阅不影响其他 */
+        }
+      }
+    }
+
+    /**
+     * 弹一条 toast。最多留 3 条 —— 一屏堆满提示等于什么都没说。
+     * @param {{ kind: string, detail?: string }} item 内容。
+     */
+    function pushToast(item) {
+      const bag = toastBag()
+      toastSeq += 1
+      const next = { id: toastSeq, at: Date.now(), kind: item.kind, detail: item.detail || '' }
+      bag.items = [...bag.items, next].slice(-3)
+      notifyToasts()
+      return next
+    }
+
+    /** 关掉一条。 */
+    function dismissToast(id) {
+      const bag = toastBag()
+      const next = bag.items.filter((item) => item.id !== id)
+      if (next.length === bag.items.length) return
+      bag.items = next
+      notifyToasts()
+    }
+
+    /**
+     * 拿一份 stats 判断"这一轮要不要说点什么"。
+     *
+     * 判据只有一条：`lastIssue.at` 比上次报过的更新 —— 也就是说**这一轮真的出过事**。
+     * 幂等是必需的：toast 生产者每回合结束都会查一次状态，而状态里那条 issue 会一直留着，
+     * 没有这个水位线的话每次回合结束都会重弹一遍同一件事。
+     *
+     * @param {object} stats host 的 stats 段。
+     * @returns {object|null} 弹出的那条（没弹则为 null），供测试断言。
+     */
+    function reportIssue(stats) {
+      const issue = stats && typeof stats === 'object' ? stats.lastIssue : null
+      if (!issue || typeof issue.at !== 'number') return null
+      // 比这次加载还早的，是上一次运行留在盘上的旧事，不是这一轮的。
+      if (issue.at < LOADED_AT) return null
+      const bag = toastBag()
+      if (issue.at <= bag.seenAt) return null
+      bag.seenAt = issue.at
+      // 用户自己撤回的回合：确实没改写成功，但那是用户按的，没什么可提示的 ——
+      // 弹一条「模型没出力」等于把责任推给模型。水位线照样推进，免得以后翻旧账。
+      if (issue.kind === 'aborted') return null
+      const kind = issue.kind === 'timeout' ? 'timeout' : 'llm-failed'
+      return pushToast({ kind, detail: typeof issue.error === 'string' ? issue.error : '' })
+    }
+
+    /**
+     * toast 生产者：挂在 `conversation.input.dock`（会话作用域），**只在回合结束时查一次**。
+     *
+     * 为什么不轮询：自动模式下改写发生在 `agent/pre-step`，也就是消息发出之后、模型开始
+     * 干活之前。回合的 `running` 从 true 落回 false 那一刻，这一轮的改写结果早就写进
+     * stats 了 —— 一次请求就够。拿不到 `useSession`（老客户端）时它什么都不做。
+     *
+     * @param {Function} t 语言域绑定。
+     * @returns {Function} React 组件。
+     */
+    function makeToastProducer(t) {
+      function Producer(props) {
+        const { useSession } = props || {}
+        const running = useSession((snapshot) => Boolean(snapshot && snapshot.running))
+        const was = React.useRef(running)
+        React.useEffect(() => {
+          const previous = was.current
+          was.current = running
+          // 只在 true → false 的**落沿**上查：回合开始了（或还没开始）都不必看。
+          if (!previous || running) return undefined
+          let alive = true
+          fetchState()
+            .then((next) => {
+              if (!alive || !next) return
+              reportIssue(next.stats)
+            })
+            .catch(() => {
+              /* 读不到就当这一轮没事发生，不打扰用户 */
+            })
+          return () => {
+            alive = false
+          }
+        }, [running])
+        return null
+      }
+      /**
+       * 宿主没给这个 hook 时**必须整个不渲染**：React 的 hook 规则不允许按条件少调一个。
+       * 包一层之后，`Producer` 自己永远是"拿到 hook 才存在"的那个组件。
+       */
+      return function InputDockEntry(props) {
+        const { useSession } = props || {}
+        if (typeof useSession !== 'function') return null
+        return h(Producer, props)
+      }
+    }
+
+    /**
+     * toast 渲染者：挂在 `shell.overlay`（frame 级、点击穿透）。
+     * @param {Function} t 语言域绑定。
+     * @returns {Function} React 组件。
+     */
+    function makeToastStack(t) {
+      return function ToastStack() {
+        const [items, setItems] = React.useState(() => toastBag().items.slice())
+        React.useEffect(() => {
+          const bag = toastBag()
+          const sync = () => setItems(bag.items.slice())
+          bag.subs.push(sync)
+          sync()
+          return () => {
+            const at = bag.subs.indexOf(sync)
+            if (at >= 0) bag.subs.splice(at, 1)
+          }
+        }, [])
+        // 有 toast 挂着的时候每 500ms 走一次时钟：顺手把过期的清掉。没挂就一个定时器都不留。
+        React.useEffect(() => {
+          if (items.length === 0) return undefined
+          const timer = window.setInterval(() => {
+            const now = Date.now()
+            for (const item of toastBag().items) {
+              if (now - item.at >= TOAST_HOLD_MS) dismissToast(item.id)
+            }
+          }, 500)
+          return () => window.clearInterval(timer)
+        }, [items.length])
+
+        const alive = items.filter((item) => Date.now() - item.at < TOAST_HOLD_MS)
+        if (alive.length === 0) return null
+        return h('div', { className: 'ph-toasts', 'data-ph-owned': 'true' },
+          alive.map((item) => h('div', {
+            key: item.id,
+            className: 'ph-toast',
+            role: 'status',
+          },
+          h('div', { className: 'ph-toast-title' }, item.kind === 'timeout' ? t('toastTimeout') : t('toastFailed')),
+          item.detail ? h('div', { className: 'ph-toast-detail' }, item.detail) : null,
+          h('div', { className: 'ph-toast-actions' },
+            h('button', {
+              type: 'button',
+              className: 'ph-btn',
+              onClick: () => dismissToast(item.id),
+            }, t('toastDismiss'))))))
+      }
+    }
+
     /* ─────────────────────────── 审查态（每会话一份） ─────────────────────────── */
 
     /**
@@ -375,13 +634,12 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
      * 订阅者。
      *
      * 为什么非这样不可：控件栏是**按会话挂载**的，切会话会把它整个重挂；而 HMR 还会把整个
-     * 客户端模块换一个新实例（旧组件的 React state 就此失联）。曾经的写法是"组件持有
-     * React state + 顺手往 window 备份一份"，于是真机上踩到过这个坑（2026-10-02）：
-     * 一次在飞的改写请求回来时，写的是 window 里那份，而**挂载着的那个组件**还在显示它
-     * 自己那份旧快照 —— 卡片就永远停在"改写中"，怎么点都好不了。
+     * 客户端模块换一个新实例（旧组件的 React state 就此失联）。状态若只放组件里，一次在飞的
+     * 改写请求回来时写的是新实例那份，而**挂载着的那个组件**还在显示它自己那份旧快照 ——
+     * 卡片就永远停在"改写中"，怎么点都好不了。
      *
-     * 现在改成：写一律走 `writeHold`（写袋子 + 通知所有活着的订阅者），读一律读袋子。
-     * 袋子挂在 window 上，所以换会话、换实例之后大家看的还是同一份。
+     * 所以：写一律走 `writeHold`（写袋子 + 通知所有活着的订阅者），读一律读袋子。
+     * 袋子挂在 window 上，换会话、换实例之后大家看的还是同一份。
      */
     const HOLD_KEY = '__PROMPT_HARDENER_HOLD__'
 
@@ -708,8 +966,14 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
          * 先弹后等是刻意的 —— 改写要几秒，不先弹的话用户点完发送只能干等。
          */
         const startReview = React.useCallback((text) => {
-          const mine = { id: nextHoldId(), phase: 'working', original: text, text, source: null, error: '', startedAt: Date.now() }
+          const mine = { id: nextHoldId(), phase: 'working', original: text, text, source: null, error: '', startedAt: Date.now(), hidden: true }
           applyHold(mine)
+          // 到点了才让卡片露面。抢在这之前回来的回答 —— 命中 `??` 放行、消息本来就够硬 ——
+          // 连一眼都不该看到它。
+          const reveal = window.setTimeout(() => {
+            const next = onReveal(readHold(sessionId), mine.id)
+            if (next) applyHold(next)
+          }, CARD_DELAY_MS)
           /**
            * 这张卡还是当初那一张吗。
            * 判据是**编号**而不是对象身份：请求可能由上一个实例发起，回来时挂载的组件已经
@@ -720,9 +984,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
             return Boolean(current) && current.id === mine.id
           }
           void (async () => {
-            // 这里**整体**包在 try 里：从前 `const controller` / `window.setTimeout` 两行在 try
-            // 之外，一旦它们抛（或将来有人在这里加一句会抛的代码），这个 async 块就静悄悄死掉 ——
-            // 没有请求、没有超时、卡片永远停在"改写中"，而且什么错误都看不到。实测踩到过。
+            // 这里**整体**包在 try 里：只要 async 块里有一句在 try 之外抛，它就静悄悄死掉 ——
+            // 没有请求、没有超时、卡片永远停在"改写中"，而且什么错误都看不到。
             let controller = null
             let timer = null
             try {
@@ -743,7 +1006,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
               // 用户已经撤回或换了另一条：这张卡过期了，什么都不做。
               if (!stillMine()) return
               if (typeof data.skipped === 'string' && data.skipped.length > 0) {
-                // 没东西可审（插件关了 / 火力关了 / 本来就够硬 / 命中 `??`）—— 直接按原文发出，
+                // 没东西可审（插件关了 / 本来就够硬 / 命中 `??`）—— 直接发出，
                 // 别拿一张"其实没改"的卡片耽误人。发的是 host 洗过的那份，不是草稿：
                 // 草稿里还带着 `??` 这类暗号（见 releaseTextFor）。
                 release(releaseTextFor(data, text))
@@ -751,7 +1014,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
               }
               if (data.changed !== true) {
                 // 改写没成功。审查模式下**绝不自动发出**：把原因摆在卡片上，由用户自己选。
-                applyHold({ ...mine, phase: 'error', error: data.error || t('failed') })
+                applyHold({ ...mine, phase: 'error', error: data.error || t('failed'), hidden: false })
                 return
               }
               applyHold({
@@ -760,6 +1023,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
                 text: data.text,
                 source: data.source,
                 error: data.error || '',
+                hidden: false,
               })
             } catch (err) {
               // 超时要单独说人话：它是"没人回音"，和"宿主明确报错"是两件事。
@@ -769,14 +1033,17 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
                 ...mine,
                 phase: 'error',
                 error: aborted ? t('timeout') : String((err && err.message) || err),
+                hidden: false,
               })
             } finally {
               if (timer !== null) window.clearTimeout(timer)
+              // 回答已经到了：还没露面的卡片就不必再露面了（已经被收掉的也照样安全）。
+              window.clearTimeout(reveal)
             }
           })().catch((err) => {
             // 兜底：万一还有哪儿在 try 之外抛了，卡片也必须变成看得见的失败态，
-            // 而不是永远停在"改写中"。这条曾经真实发生过，所以留着。
-            applyHold({ ...mine, phase: 'error', error: String((err && err.message) || err) })
+            // 而不是永远停在"改写中"。
+            applyHold({ ...mine, phase: 'error', error: String((err && err.message) || err), hidden: false })
           })
         }, [applyHold, release, t, sessionId])
 
@@ -899,16 +1166,18 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           onClick: () => setOpen((v) => !v),
         },
         bars,
-        // 只留名字。档位由颜色和力量条标识就够了，不再写"关/轻/中/重/狂"。
+        // 只留名字：档位由颜色和力量条标识就够了。
         h('span', null, t('label')))
 
-        // 卡片挂着时只显示卡片：面板要让位，免得两个浮层叠在一起。
+        // 卡片挂着时只显示卡片：面板要让位，免得两个浮层叠在一起。压着还没露面的那张
+        // （`hidden`）一样让位 —— 那段延迟里屏幕上只剩药丸。
+        const showCard = cardVisible(hold)
         const panel = open && !hold
 
-        const rootAttrs = { className: 'ph-root', ref: rootRef, 'data-ph-owned': 'true', 'data-card': String(Boolean(hold)) }
-        if (!panel && !hold) return h('span', rootAttrs, pill)
+        const rootAttrs = { className: 'ph-root', ref: rootRef, 'data-ph-owned': 'true', 'data-card': String(showCard) }
+        if (!panel && !showCard) return h('span', rootAttrs, pill)
 
-        if (hold) {
+        if (showCard) {
           const mine = holdRef.current || hold
           const busy = mine.phase === 'working' || mine.phase === 'sending'
           // 等了多久（`nowMs` 在等待期间每 500ms 推进一次）。
@@ -918,9 +1187,9 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
             : (mine.phase === 'sending'
               ? `${t('sending')}${waited === null ? '' : ` ${waited}s`}`
               : (mine.source === 'rules-fallback' ? t('fromRules') : ''))
-          // 卡片上不养闲字：原来这里有一行"6 字 → 466 字 · 已手改"，整行删掉了，
-          // 空出来的高度给了正文输入框。曾经还写过"运行中，将排队发出"，但客户端拿不到
-          // "当前回合在不在跑"的可信信号，那句在空闲时照样显示 —— 界面宁可少说，也不能说错。
+          // 卡片上不养闲字：字数统计那类信息不进卡片，高度留给正文输入框。
+          // "运行中，将排队发出"也不写：客户端拿不到"当前回合在不在跑"的可信信号，
+          // 那句在空闲时照样会显示 —— 界面宁可少说，也不能说错。
 
           const card = h('div', { className: 'ph-card', role: 'dialog', 'aria-label': t('reviewTitle') },
             h('div', { className: 'ph-cardtitle' },
@@ -1050,6 +1319,21 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           order: 30,
           label: () => t('label'),
         }, makeControl(t, ctx))), `${NS}: composer control`)
+        // 改写出事的提示。生产者挂会话作用域的 dock（要拿 `useSession` 看回合的起落），
+        // 渲染者挂 frame 级的 overlay（官方给 toast 留的那一层）。分开挂是因为
+        // overlay 拿不到会话 —— 也正因为如此，它才必须靠 window 上的袋子通信。
+        own(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+          name: 'conversation.input.dock',
+          id: `${NS}-toast-source`,
+          order: 40,
+          label: () => t('label'),
+        }, makeToastProducer(t))), `${NS}: toast source`)
+        own(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: `${NS}-toasts`,
+          order: 60,
+          label: () => t('label'),
+        }, makeToastStack(t))), `${NS}: toast stack`)
       },
       /**
        * 测试缝。拦截判据与审查态的读写在浏览器里没法离线验，而它们出错的方式都很安静
@@ -1062,11 +1346,21 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
       __internals: {
         createSendGuards,
         releaseTextFor,
+        cardVisible,
+        onReveal,
+        CARD_DELAY_MS,
         holdBag,
         readHold,
         writeHold,
         interruptInflightHolds,
         nextHoldId,
+        toastBag,
+        pushToast,
+        dismissToast,
+        reportIssue,
+        LOADED_AT,
+        makeToastProducer,
+        makeToastStack,
         ACCENT,
         LEVELS,
         DICT,

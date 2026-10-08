@@ -11,8 +11,8 @@
  * 2. **做主路径改写**：把原话交给模型，按 `lib/prompt.md`（可外部编辑）全量重写。
  *    模型调用失败时回落到 `lib/fallback.js` 的规则拼接，保证这一轮不白跑。
  * 3. **持久化开关**。状态写在 `$DSH_HOME/prompt-hardener/state.json`，不放在包目录里
- *    —— 包目录会被插件升级整体替换掉。旧名 `ybb-optimizer` 的目录会在激活时整体迁移
- *    过来（见 `migrateDataDirectory`），所以改名不会丢用户手改的 prompt.md 和开关状态。
+ *    —— 包目录会被插件升级整体替换掉。更早版本用的 `ybb-optimizer` 目录会在激活时整体
+ *    迁移过来（见 `migrateDataDirectory`），用户手改的 prompt.md 与开关状态不会丢。
  * 4. **给浏览器半边供数**。注册一条 `webServer` 路由，供输入框控制条读写状态。
  *
  * 一个"就这一次"的入口（见 `lib/triggers.js`）：
@@ -47,12 +47,12 @@ export const name = 'prompt-hardener'
 /**
  * 不硬依赖任何服务，这样"改写提示词"这个核心能力永远不会因为某个便利设施没就绪而上不来。
  *
- * 两个服务走两条不同的路，这个区别是实测踩出来的：
+ * 两个服务走两条不同的路：
  * - `llm`：`ctx.get('llm')` 惰性获取。缺失时自动回落到规则拼接。
  * - `webServer`：**必须走 `ctx.inject(['webServer'], child => …)` 等它就绪**，不能裸访问。
  *   cordis 的上下文代理在服务没声明/没就绪时，裸访问 `ctx.webServer` 会直接抛
  *   `cannot get property "webServer" without inject`；而冷启动时 webServer 通常晚于
- *   本插件就绪，于是路由永远注册不上（控制条读到 405），插件本体却看着"正常"。
+ *   本插件就绪，裸访问就等于放弃注册路由，插件本体却看着"正常"。
  *   `ctx.inject` 是 cordis 正规的"等依赖就绪"入口：服务一就绪就回调，回调拿到的子
  *   上下文里 webServer 是真正注入好的。若宿主根本没有 webServer，本插件照常激活，
  *   只是没有控制条（headless 宿主）。
@@ -62,11 +62,10 @@ export const inject = []
 /** 插件自己的数据目录名。 */
 const DATA_DIRNAME = 'prompt-hardener'
 /**
- * 改名前的数据目录名。
+ * 更早版本用的数据目录名。
  *
- * 2026-09-29 那次改名（`dsh-ybb-optimizer` → `dsh-prompt-hardener`）**故意**没动这个目录，
- * 因为改了等于把用户手改的 `prompt.md` 和开关状态（`state.json`）一起弄丢。现在补一次
- * **带迁移**的改名：目录跟着产品名走，但旧目录会被整体搬过来，数据一件不少。
+ * 目录跟着产品名走；旧目录在激活时被整体搬过来，用户手改的 `prompt.md` 与开关状态
+ * （`state.json`）一件不少。
  */
 const LEGACY_DATA_DIRNAME = 'ybb-optimizer'
 /** 状态文件名。 */
@@ -134,7 +133,7 @@ export function dataDirectory() {
   return join(home, DATA_DIRNAME)
 }
 
-/** 旧数据目录（改名前的名字），只用于迁移。 */
+/** 更早版本的数据目录，只用于迁移。 */
 export function legacyDataDirectory() {
   const home = process.env.DSH_HOME || join(homedir(), '.dsh')
   return join(home, LEGACY_DATA_DIRNAME)
@@ -148,14 +147,13 @@ export function legacyDataDirectory() {
  *   不存在"复制到一半崩了，用户既没有旧数据也没有新数据"的中间态。
  * - **绝不预先创建目标目录**。它的父目录就是 `DSH_HOME`，而旧目录既然存在、父目录必然
  *   存在 —— 预建纯属多余。而且目标若已存在，只有**空目录**才让它让路：空壳里没有任何
- *   用户数据（是上一次迁移半途留下的），删掉再搬是安全的；非空就一律收手，绝不覆盖。
+ *   用户数据（迁移半途留下的），删掉再搬是安全的；非空就一律收手，绝不覆盖。
  * - 任何失败都只返回 `'failed'`，不抛、不改写、不删用户的任何文件。迁移失败最坏的结果
  *   是继续用包内自带提示词，而不是把用户的文件搞坏。
  *
  * 返回值把"没什么可迁"和"已经有人在用"分开，**因为这两件事的诊断含义完全不同**：
- * 2026-10-02 真机实测踩到过——插件被应用了两次，第二次看到新目录已存在，信标里写着
- * `dataMigration: none`，看起来像"迁移没跑、用户数据被落在原地了"，其实第一次早就迁完了。
- * 分开之后，看到 `in-use` 就知道是"有人先动过手"，而不是"漏了"。
+ * 前者要怀疑"迁移是不是没跑"，后者说明新目录已经在用了（插件被应用两次时，第二次必然
+ * 读到这个），不是漏迁。
  *
  * @returns {Promise<'none'|'in-use'|'migrated'|'failed'>} 迁移结果。
  */
@@ -223,9 +221,8 @@ export function bundledPromptFile() {
  * 不能因为用户换了一份 prompt.md 就跟着消失。每次调用时另起一段拼在系统提示词后面，
  * 提示词正文一字不动。
  *
- * 第 2 条是实测逼出来的：只写"别替用户做资源决策"时，模型仍然会照着提示词里那两句开场白
+ * 第 2 条点名两种具体越界：只写"别替用户做资源决策"时，模型会照着提示词里那两句开场白
  * 硬写"agent team 这次算了"（替用户宣布没钱），给代码任务硬加"电脑烧了我都夸你有劲"。
- * 所以这里把这两种具体越界点名。
  */
 export const FIDELITY_CLAUSE = [
   '## 执行约束（插件追加，优先级高于上面的风格规范）',
@@ -352,9 +349,12 @@ export function normalizeMode(value, fallback = DEFAULTS.mode) {
 export function sanitizeState(raw, defaults = DEFAULTS) {
   const source = raw && typeof raw === 'object' ? raw : {}
   const llmRaw = source.llm && typeof source.llm === 'object' ? source.llm : {}
+  // 强度档位里没有"关"：老配置可能还写着 `intensity:'off'`（插件开着但不改写），它跟
+  // 挂件那颗「关」在用户视角分不出来，读到就翻译成"整体停用"，语义不变。
+  const legacyOff = typeof source.intensity === 'string' && source.intensity.trim().toLowerCase() === 'off'
   return {
-    enabled: bool(source.enabled, defaults.enabled),
-    intensity: normalizeIntensity(source.intensity ?? defaults.intensity),
+    enabled: legacyOff ? false : bool(source.enabled, defaults.enabled),
+    intensity: normalizeIntensity(legacyOff ? undefined : (source.intensity ?? defaults.intensity)),
     mode: normalizeMode(source.mode, defaults.mode),
     llm: {
       provider: typeof llmRaw.provider === 'string' ? llmRaw.provider : defaults.llm.provider,
@@ -501,7 +501,7 @@ function autoMaxTokens(chars) {
  * 审查卡片用的模型路由。
  *
  * 这条路上**没有 agent**（不是某个回合发起的，消息还躺在输入框里），所以 `resolveRoute`
- * 的后两级回退（落库请求头 / agent 创建时路由）全都用不上。改成两级：
+ * 的后两级回退（落库请求头 / agent 创建时路由）全都用不上。这里两级就够：
  *
  * 1. 插件的 `llm.provider` + `llm.model`（用户显式钉死）；
  * 2. 宿主的默认模型服务 `agentDefaultModel` —— 这正是"下一条消息会用哪个模型"。
@@ -531,6 +531,23 @@ function reviewRoute(ctx, configured) {
 }
 
 /**
+ * 模型调用失败时给错误打一个分类标记。
+ *
+ * **判据是信号，不是错误字符串。** 插件用自己的 `AbortSignal.timeout` 掐断调用之后，
+ * 宿主的模型服务会把这次中断**消化成一个空流**，插件这边只剩下"没有吐文本"。按错误
+ * 字符串猜，就会把超时报成「模型没出力」—— 用户看到的 toast 说的不是真实原因。
+ *
+ * @param {string} kind `timeout` | `aborted` | `llm-failed`。
+ * @param {string} message 给人看的原文。
+ * @returns {Error} 带 `phKind` 的错误。
+ */
+function llmFailure(kind, message) {
+  const error = new Error(message)
+  error.phKind = kind
+  return error
+}
+
+/**
  * 调一次模型，按提示词全量重写用户原话。
  * @param {object} ctx cordis 上下文。
  * @param {object} agent 当前 agent。
@@ -550,10 +567,13 @@ async function llmRewrite(ctx, agent, text, options) {
     throw new Error('no provider/model route available: set llm.provider + llm.model, or send the first message after the session has a logged route')
   }
 
-  const signals = [options.signal].filter(Boolean)
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    signals.push(AbortSignal.timeout(configured.timeoutMs > 0 ? configured.timeoutMs : DEFAULTS.llm.timeoutMs))
-  }
+  const timeoutMs = configured.timeoutMs > 0 ? configured.timeoutMs : DEFAULTS.llm.timeoutMs
+  const callerSignal = options.signal || null
+  const timeoutSignal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(timeoutMs)
+    : null
+
+  const signals = [callerSignal, timeoutSignal].filter(Boolean)
   let signal
   if (signals.length === 0) signal = undefined
   else if (signals.length === 1) signal = signals[0]
@@ -573,12 +593,31 @@ async function llmRewrite(ctx, agent, text, options) {
     ...(signal === undefined ? {} : { signal }),
   }
 
+  /**
+   * 出事后归因：**先看信号，再看它自己报的错**。
+   * @param {unknown} cause 底层抛出来的东西（空流那条路没有异常，传 null）。
+   * @param {string} message 归因不出结果时用的话术。
+   * @returns {Error}
+   */
+  const attribute = (cause, message) => {
+    if (timeoutSignal && timeoutSignal.aborted) {
+      return llmFailure('timeout', `llm call timed out after ${timeoutMs}ms`)
+    }
+    if (callerSignal && callerSignal.aborted) return llmFailure('aborted', 'llm call aborted by caller')
+    return cause instanceof Error ? cause : new Error(message)
+  }
+
   let out = ''
-  for await (const chunk of llm.stream(call)) {
-    if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+  try {
+    for await (const chunk of llm.stream(call)) {
+      if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') out += chunk.text
+    }
+  } catch (cause) {
+    throw attribute(cause, 'llm call failed')
   }
   const trimmed = out.trim()
-  if (trimmed.length === 0) throw new Error('llm produced no text')
+  // 空流最可能就是被掐断 —— 这种时候信号说了算，别去猜字符串。
+  if (trimmed.length === 0) throw attribute(null, 'llm produced no text')
   return trimmed
 }
 
@@ -592,13 +631,17 @@ async function llmRewrite(ctx, agent, text, options) {
  * @param {object|null} agent 当前 agent。审查卡片那条路上**没有 agent**（不是回合发起的）。
  * @param {string} text 待改写正文。
  * @param {object} options `{ llm, intensity, prompt, signal, seed, allowLlm }`。
- * @returns {Promise<{ text: string, changed: boolean, source: string|null, error: string|null, meta: object|null }>}
- *          `changed: false` 表示连规则兜底都没能改动它（调用方按"原样放行"处理）。
+ * @returns {Promise<{ text: string, changed: boolean, source: string|null, error: string|null,
+ *   errorKind: string|null, meta: object|null }>}
+ *          `changed: false` 表示连规则兜底都没能改动它（调用方按"原样放行"处理）；
+ *          `errorKind` 是失败归因（`timeout` / `aborted` / `llm-failed`），供 toast 说对话。
  */
 async function rewriteText(ctx, agent, text, options) {
   let candidate = null
   let source = null
   let error = null
+  /** 失败归因。**来自信号标记，不是从错误字符串里猜出来的**（见 `llmFailure`）。 */
+  let errorKind = null
 
   if (options.allowLlm !== false) {
     try {
@@ -606,18 +649,19 @@ async function rewriteText(ctx, agent, text, options) {
       source = 'llm'
     } catch (cause) {
       error = String((cause && cause.message) || cause)
+      errorKind = cause && typeof cause.phKind === 'string' ? cause.phKind : 'llm-failed'
     }
   }
 
   if (candidate === null) {
     const fallback = assembleFallback(text, { intensity: options.intensity, seed: options.seed })
     if (fallback.changed) {
-      return { text: fallback.text, changed: true, source: 'rules-fallback', error, meta: fallback.meta }
+      return { text: fallback.text, changed: true, source: 'rules-fallback', error, errorKind, meta: fallback.meta }
     }
   }
 
-  if (candidate === null) return { text, changed: false, source: null, error, meta: null }
-  return { text: candidate, changed: true, source, error, meta: null }
+  if (candidate === null) return { text, changed: false, source: null, error, errorKind, meta: null }
+  return { text: candidate, changed: true, source, error, errorKind, meta: null }
 }
 
 /**
@@ -768,7 +812,7 @@ export function apply(ctx, config) {
       ...extra,
     }, null, 2)
     // 串行 + 先写临时文件再 rename：enter 与 ready 两笔是并发发起的，
-    // 直接 writeFile 会把两次内容交错成非法 JSON（2026-09-29 实测踩到）。
+    // 直接 writeFile 会让两次内容交错成非法 JSON。
     //
     // 而且**每一笔信标都必须排在数据目录迁移之后**：写信标要 `mkdir` 数据目录，
     // 一旦它先跑，迁移就会看见"新目录已经在用"而收手，用户的旧 prompt.md 与开关
@@ -789,10 +833,10 @@ export function apply(ctx, config) {
   /**
    * 挂一个子效应。**任何一个子效应炸了都只记一笔，绝不把整个 plugin 带下水。**
    *
-   * 教训（2026-09-29 实测）：路由注册一旦抛 `duplicate exact route`，`apply` 就会中断，
-   * 整行被标成「插件加载失败」并从装配树里掉出去 —— 而那个路由只是给控制条用的便利设施，
-   * 改写能力本身根本不依赖它。而且掉出去之后**不会自己重试**，必须等下一次文件变更事件
-   * 才会重新 import + apply，表现就是"插件莫名其妙没了"。
+   * 路由注册一旦抛 `duplicate exact route`，`apply` 就会中断，整行被标成「插件加载失败」
+   * 并从装配树里掉出去 —— 而那个路由只是给控制条用的便利设施，改写能力本身根本不依赖它。
+   * 而且掉出去之后**不会自己重试**，必须等下一次文件变更事件才会重新 import + apply，
+   * 表现就是"插件莫名其妙没了"。
    *
    * @param {Function} fn 效应体，返回清理函数。
    * @param {string} label 诊断用标签。
@@ -830,7 +874,7 @@ export function apply(ctx, config) {
    * 2. `load()` 读状态文件。迁移是**异步改名**，读盘那一刻新路径上还是空的 ⇒ 读到 ENOENT
    *    ⇒ 内存里是出厂默认（intensity=standard、mode=auto）⇒ 用户自己选的档位与审查模式
    *    消失，而且第一轮统计一写盘还会把默认值落回状态文件，等于把用户的设置覆盖掉。
-   *    （这条 2026-10-02 真机实测踩到过，见 test/host.test.mjs 里那两条回归。）
+   *    （对应 test/host.test.mjs 里那两条时序用例。）
    *
    * 所以：promise 在这里先起出来，`load()` 与信标链都 await 它。
    * 迁移失败不抛（`catch` 成 `'failed'`），它绝不能拦住插件本体。
@@ -905,7 +949,7 @@ export function apply(ctx, config) {
   // apply 一进来就先落一笔。这一笔的有无能把两种情况分开：
   //   没有这一笔 → 模块压根没 import 成功（apply 根本没跑）；
   //   有这一笔、但 phase 停在 enter → apply 跑了，后面某个子效应炸了。
-  // 排查"插件加载失败"时我缺的正是这个区分，所以补上。
+  // 排查"插件加载失败"时，这个区分是关键。
   void writeBeacon({ phase: 'enter' })
 
   /* ─────────────────── 0. 激活准备：播种提示词 + 落就绪信标 ─────────────────── */
@@ -947,7 +991,10 @@ export function apply(ctx, config) {
       if (!decision || decision.kind !== 'enter') return decision
 
       const current = state
-      if (!current.enabled || current.intensity === 'off') return decision
+      // 整体停用 = 什么都不做，**连触发前缀都不解释**：那两个暗号是本插件的东西，
+      // 插件关着的时候它们就只是普通标点，没有理由去动用户打的字。
+      // 「不改写」只有这一个开关：强度档位里没有"关"这个值。
+      if (!current.enabled) return decision
 
       const messages = Array.isArray(decision.messages) ? decision.messages : []
       const prompt = resolvePrompt()
@@ -1031,6 +1078,16 @@ export function apply(ctx, config) {
         if (outcome.error) {
           note(`llm rewrite failed, falling back to rules: ${outcome.error}`)
           stat.lastError = outcome.error
+          // 顺手给浏览器半边留一条"这一轮出事了"的证据。自动模式下改写发生在消息发出
+          // **之后**，用户没有任何别的渠道知道这条是兜底拼的 —— 全客户端也读不到这条
+          // 日志。所以把事件写进 stats，由浏览器那半边的 toast 去说（见 client.js）。
+          stat.lastIssue = {
+            at: Date.now(),
+            // **归因来自信号标记，不是从 error 字符串里猜**：宿主会把中断消化成空流，
+            // 错误只剩 "llm produced no text"，按字符串猜会把超时说成「模型没出力」。
+            kind: outcome.errorKind || 'llm-failed',
+            error: outcome.error,
+          }
         }
 
         if (!outcome.changed) {
@@ -1106,7 +1163,7 @@ export function apply(ctx, config) {
         const next = { ...state, ...(patch && typeof patch === 'object' ? patch : {}) }
         // `stats` 是**按字段合并**，不是整体替换。它是一堆互不相关的计数器，调用方通常只想
         // 更新其中一个（只报一项统计、写一个诊断字段），整体替换会静默抹掉其余全部 ——
-        // 2026-10-02 实测踩到：一次 `{stats:{probeStage}}` 就把 rewrites / reviewCalls 抹平了。
+        // 一次 `{stats:{probeStage}}` 就会把 rewrites / reviewCalls 抹平。
         if (patch && typeof patch === 'object' && patch.stats && typeof patch.stats === 'object') {
           next.stats = { ...state.stats, ...patch.stats }
         }
@@ -1119,10 +1176,9 @@ export function apply(ctx, config) {
       }
     }
 
-    // 冷启动的时序才是常态：宿主先激活本插件，webServer 晚一步才提供。旧写法在这里
-    // 裸访问 `ctx.webServer` 兜底，结果必然抛 `cannot get property "webServer" without
-    // inject` —— 抛出点又在轮询之前，于是路由一次都没注册上，控制条永远读到 405。
-    // 现在改用 `ctx.inject`：等服务就绪再跑回调，不需要裸访问，也不需要自己轮询等待。
+    // 冷启动的时序才是常态：宿主先激活本插件，webServer 晚一步才提供。在这里裸访问
+    // `ctx.webServer` 必然抛 `cannot get property "webServer" without inject`，路由一次
+    // 都注册不上。所以用 `ctx.inject`：等服务就绪再跑回调，不需要裸访问，也不需要轮询。
     const fiber = ctx.inject(['webServer'], (child) => {
       let disposer = null
       try {
@@ -1200,13 +1256,15 @@ export function apply(ctx, config) {
           const current = state
           const patch = { reviewCalls: Number(current.stats.reviewCalls || 0) + 1, lastReviewAt: Date.now() }
 
-          // 整体关掉 / 火力关掉时，审查卡片没有任何东西可审 —— 直接告诉它"原样发出"。
-          if (!current.enabled || current.intensity === 'off') {
+          // 整体停用 = 连触发前缀都不解释（与 pre-step 同一条口径）：
+          // 插件关着的时候 `!!` / `??` 只是用户打的普通标点，没有理由去动。
+          if (!current.enabled) {
             state = { ...state, stats: { ...state.stats, ...patch } }
             void persist()
             send(200, { ok: true, skipped: 'disabled', changed: false, text, source: null })
             return
           }
+
           // 和 pre-step 共用同一条判定：卡片上看到的必须是"不审查直接发出去"会得到的那个东西。
           const plan = planForText(text, current)
           /** 跳过时回给卡片的是**剥掉前缀那份**，它会原样发出去（见 client 的 release）。 */

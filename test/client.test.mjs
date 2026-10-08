@@ -136,9 +136,13 @@ test('apply 注册语言域、样式表与输入框控件', () => {
 
   assert.ok(calls.locale.includes('prompt-hardener'))
   assert.ok(calls.inject.includes('conversation.input.left'))
-  assert.equal(calls.slots.length, 1)
-  const entry = calls.slots[0]
-  assert.equal(entry.options.name, 'conversation.input.left')
+  // 三条注册一条都不能少：输入框控件 + 状态提示的"生产者"与"渲染者"。
+  // 少任何一条在真机上都是"某个功能静默不见了"，所以这里逐个点名。
+  assert.deepEqual(
+    calls.slots.map((item) => item.options.name).sort(),
+    ['conversation.input.dock', 'conversation.input.left', 'shell.overlay'],
+  )
+  const entry = calls.slots.find((item) => item.options.name === 'conversation.input.left')
   assert.equal(entry.options.id, 'prompt-hardener')
   assert.equal(typeof entry.options.order, 'number')
 
@@ -192,7 +196,9 @@ test('展开面板：新标题、新标签、且一个字的多余统计都不�
     slots: {
       inject: (_owner, cb) => cb(),
       register: (options, Component) => {
-        entry = { options, Component }
+        // 插件会注册三处 slot（控件 + toast 的生产者与渲染者）。这几个用例要验的是
+        // 输入框里那个控件，所以按名字挑，别让"最后注册的那个"决定验的是谁。
+        if (options.name === 'conversation.input.left') entry = { options, Component }
         return () => {}
       },
     },
@@ -217,14 +223,12 @@ test('展开面板：新标题、新标签、且一个字的多余统计都不�
     assert.ok(texts.includes(label), `档位名没渲染：${label}`)
   }
 
-  // 说明文案必须是两行，"模型不可用"那句单独落在第二行
+  // 说明文案只有一行：短、带疯味，不靠换行排版
   const hint = textsOf(tree).find((x) => x.includes('提示词'))
   assert.ok(hint, '找不到说明文案')
-  // 现在是单行疯味版。以前是两行、靠 CSS 的 pre-line 才不被折叠成一行 ——
-  // 那个坑值得记着：只要说明里还想带 \n，就务必同时把 white-space 配好，否则等于没改。
   assert.ok(hint.includes('硬邦邦'), `说明要带硬邦邦的味：${hint}`)
   assert.ok(!hint.includes('硬汉风格'), `旧词应当已被替换掉：${hint}`)
-  assert.ok(!hint.includes('\n'), `现在只保留一句，不该再有换行：${hint}`)
+  assert.ok(!hint.includes('\n'), `只保留一句，不该有换行：${hint}`)
   assert.ok(hint.includes('全量'), `要保住"全量重写"这层意思：${hint}`)
   assert.ok(hint.includes('提示词'), `要保住"按提示词"这层意思：${hint}`)
   assert.ok(hint.length <= 30, `面板说明太长（${hint.length} 字）：${hint}`)
@@ -395,10 +399,9 @@ test('审查相关的文案中英双语都得在', () => {
 
 const internals = registered.factory(() => ReactStub).__internals
 
-test('写审查态会叫醒所有订阅者（"卡片永远停在改写中"那个 bug 的回归）', () => {
-  // 真机实测踩到（2026-10-02）：在飞的改写请求回来时写的是 window 里那份，而挂载着的
-  // 组件还在显示自己的旧快照 ⇒ 卡片永远停在"改写中"。修法是"写袋子 + 通知订阅者"，
-  // 这条用例守的就是那句通知。
+test('写审查态会叫醒所有订阅者（卡片不能停在"改写中"）', () => {
+  // 在飞的改写请求回来时，挂载着的组件必须收到通知去读袋子里的新状态；否则它一直显示
+  // 自己的旧快照 ⇒ 卡片永远停在"改写中"。这条用例守的就是那句通知。
   const { holdBag, readHold, writeHold, nextHoldId } = internals
   const bag = holdBag()
   bag.byId = {}
@@ -485,7 +488,9 @@ test('审查卡片能渲染出来，三个出口齐全，正文可编辑', () =>
     slots: {
       inject: (_owner, cb) => cb(),
       register: (options, Component) => {
-        entry = { options, Component }
+        // 插件会注册三处 slot（控件 + toast 的生产者与渲染者）。这几个用例要验的是
+        // 输入框里那个控件，所以按名字挑，别让"最后注册的那个"决定验的是谁。
+        if (options.name === 'conversation.input.left') entry = { options, Component }
         return () => {}
       },
     },
@@ -504,8 +509,8 @@ test('审查卡片能渲染出来，三个出口齐全，正文可编辑', () =>
   const tree = entry.Component({ sessionId: 'session-test', inputActions: { submit() {}, setDraft() {} } })
   const texts = textsOf(tree).join(' | ')
   assert.ok(texts.includes('硬邦邦审查！！！'), `卡片标题不对：${texts}`)
-  // 字数统计那一行整行删掉了，空出来的高度给了正文输入框（样式表那条 min-height 由
-  // 下面的"样式表"用例守）。这里守的是"那一行真的不在树里了"。
+  // 卡片正文区不放字数统计（样式表那条 min-height 由下面的"样式表"用例守）；
+  // 这里守的是"它真的不在树里"。
   assert.ok(!/\d\s*字/.test(texts), `字数统计没删干净：${texts}`)
   assert.equal(findNode(tree, (node) => node.props && node.props.className === 'ph-meta'), null,
     '字数统计那一行必须整行消失')
@@ -545,7 +550,9 @@ test('审查卡片：改写中时正文禁用，但"按原文发出"必须还开
     slots: {
       inject: (_owner, cb) => cb(),
       register: (options, Component) => {
-        entry = { options, Component }
+        // 插件会注册三处 slot（控件 + toast 的生产者与渲染者）。这几个用例要验的是
+        // 输入框里那个控件，所以按名字挑，别让"最后注册的那个"决定验的是谁。
+        if (options.name === 'conversation.input.left') entry = { options, Component }
         return () => {}
       },
     },
@@ -574,7 +581,7 @@ test('审查卡片：改写中时正文禁用，但"按原文发出"必须还开
   module.__internals.holdBag().byId = {}
 })
 
-test('药丸只留名字：档位靠颜色和力量条标识，不再写"关/轻/中/重/狂"', () => {
+test('药丸只留名字：档位靠颜色和力量条标识', () => {
   const module = registered.factory(() => ReactStub)
   let entry = null
   let dict = null
@@ -595,7 +602,9 @@ test('药丸只留名字：档位靠颜色和力量条标识，不再写"关/轻
     slots: {
       inject: (_owner, cb) => cb(),
       register: (options, Component) => {
-        entry = { options, Component }
+        // 插件会注册三处 slot（控件 + toast 的生产者与渲染者）。这几个用例要验的是
+        // 输入框里那个控件，所以按名字挑，别让"最后注册的那个"决定验的是谁。
+        if (options.name === 'conversation.input.left') entry = { options, Component }
         return () => {}
       },
     },
@@ -608,7 +617,7 @@ test('药丸只留名字：档位靠颜色和力量条标识，不再写"关/轻
   assert.ok(pill, '找不到硬邦邦药丸')
   const pillTexts = textsOf(pill).join('')
   assert.equal(pillTexts, '硬邦邦', `药丸上只该剩名字，实际是：${pillTexts}`)
-  // 名字可以省，力量条不能省 —— 它是现在唯一还在报档位的东西。
+  // 名字可以省，力量条不能省 —— 档位全靠它和颜色来报。
   const bars = findNode(pill, (node) => node.props && node.props.className === 'ph-bars')
   assert.ok(bars, '力量条不见了，档位就没有任何标识了')
 })
@@ -642,15 +651,14 @@ test('样式表：主按钮悬停不许被通用悬停洗白；药丸无边框�
   assert.match(pill, /box-sizing:\s*border-box/, '没有 border-box 的话，去掉描边后高度会塌 2px')
   assert.match(pill, /border-radius:\s*var\(--dsw-radius-sm\)/, '圆角要顺齐官方（8px）')
 
-  // 字数统计那一行删掉后，空出来的 34px 必须还给正文输入框（92 → 126）。
+  // 正文输入框起步 126px。
   const editAt = css.indexOf('.ph-edit {')
   assert.ok(editAt > -1, '找不到正文输入框样式')
   const edit = css.slice(editAt, css.indexOf('}', editAt))
-  assert.match(edit, /min-height:\s*126px/, '输入框没有吃掉字数统计空出来的高度')
-  assert.equal(css.includes('.ph-meta'), false, '.ph-meta 已经没人用了，规则该删掉')
+  assert.match(edit, /min-height:\s*126px/, '输入框高度不对')
+  assert.equal(css.includes('.ph-meta'), false, '.ph-meta 不该有规则')
 
-  // 删掉字数统计那一行时，按钮行与输入框之间就贴死了 —— 间隙原来是靠那一行的
-  // 上下边距"顺带"提供的。这里把它钉住：真机上表现为输入框挤着按钮，只有肉眼看得见。
+  // 按钮行与输入框之间的 12px 间隙由这条 margin-top 提供；没有它两者贴死。
   const actionsAt = css.indexOf('.ph-actions {')
   assert.ok(actionsAt > -1, '找不到按钮行样式')
   const actions = css.slice(actionsAt, css.indexOf('}', actionsAt))
@@ -675,4 +683,143 @@ test('放行时发 host 洗过的那份：草稿里的 `??` 不许跟着消息�
   assert.equal(internals.releaseTextFor(null, '草稿'), '草稿')
   assert.equal(internals.releaseTextFor({ text: 'x' }, undefined), 'x')
   assert.equal(internals.releaseTextFor(null, undefined), '', '两边都没有就是空串，不许是 undefined')
+})
+
+/* ───────────── 卡片延迟露面：即时就有答案的不许闪一张卡 ───────────── */
+
+test('卡片延迟露面：`??` 放行 / 本来就够硬这类秒回，连一眼都不该看到卡片', () => {
+  // 卡片先弹后等是刻意的（改写要几秒，不先弹用户只能干等）；但宿主对"这次不用审"的回答
+  // 是秒回的，当场弹出来只会闪一下。判据分成两半：露面时间有下限，且到点时还要复查。
+  const { cardVisible, onReveal, CARD_DELAY_MS } = internals
+  // 上限压住是因为它是用户按完回车的空窗 —— 量过：渲染进程里那条秒回的路 max 10ms，
+  // 所以几十毫秒就有几倍余量，过了百毫秒人就能感觉到"卡片来得慢"。
+  assert.ok(CARD_DELAY_MS >= 20 && CARD_DELAY_MS <= 150,
+    `延迟要够长（秒回抢不上）又不能让人等，实际 ${CARD_DELAY_MS}`)
+
+  // 压着的卡片不上屏；露过面的、以及"没有卡片"时按常理来。
+  assert.equal(cardVisible(null), false)
+  assert.equal(cardVisible({ id: 7, hidden: true }), false, '压着的时候屏幕上只该有药丸')
+  assert.equal(cardVisible({ id: 7, hidden: false }), true)
+  assert.equal(cardVisible({ id: 7 }), true, '没标 hidden 的（比如 HMR 留下的）照常显示')
+
+  // 到点了：还是那张压着的卡 → 显示；
+  const shown = onReveal({ id: 7, hidden: true, phase: 'working' }, 7)
+  assert.equal(cardVisible(shown), true)
+  assert.equal(shown.phase, 'working', '复查时不能把期间变化的阶段抹掉')
+  // 回答已经先到、卡片被收掉 → 什么都不做（这一条就是"不闪"本身）；
+  assert.equal(onReveal(null, 7), null, '卡片已经收掉了，绝不许把它写回来')
+  // 换了一张卡（撤回后重开 / 上一个实例的）→ 不动别人的；
+  assert.equal(onReveal({ id: 8, hidden: true }, 7), null)
+  // 已经露过面了（正常改写，等了几秒）→ 不动。
+  assert.equal(onReveal({ id: 7, hidden: false }, 7), null)
+})
+
+/* ───────────────────── 状态提示：改写出事时的那一条 ───────────────────── */
+
+test('toast：同一件事只弹一次，新事件才再弹（不然每回合结束都重弹一遍）', () => {
+  const bag = internals.toastBag()
+  bag.items = []
+  bag.seenAt = 0
+  const fresh = internals.LOADED_AT + 1000
+
+  assert.ok(internals.reportIssue({ lastIssue: { at: fresh, kind: 'llm-failed', error: 'boom' } }), '第一次要弹')
+  assert.equal(bag.items.length, 1)
+  assert.equal(
+    internals.reportIssue({ lastIssue: { at: fresh, kind: 'llm-failed', error: 'boom' } }),
+    null,
+    '同一个时间戳不许重复弹')
+  assert.equal(bag.items.length, 1)
+
+  assert.ok(internals.reportIssue({ lastIssue: { at: fresh + 1, kind: 'timeout' } }), '新事件要弹')
+  assert.equal(bag.items.length, 2)
+
+  // 没有 issue 的各种形状都不许有事
+  assert.equal(internals.reportIssue({}), null)
+  assert.equal(internals.reportIssue(null), null)
+  assert.equal(internals.reportIssue({ lastIssue: { kind: 'llm-failed' } }), null, '没有时间戳就没法判断新旧')
+
+  bag.items = []
+  bag.seenAt = 0
+})
+
+test('toast：重启后不许为上一次运行留在盘上的旧事弹提示', () => {
+  // stats 落在盘上，上一次运行的 `lastIssue` 会被读回来；而水位线在 window 上，刷新即归零。
+  // 少了 `LOADED_AT` 这道闸，重启后第一轮结束就会为几小时前那次失败弹一条 —— 那句话是假的。
+  const bag = internals.toastBag()
+  bag.items = []
+  bag.seenAt = 0
+
+  assert.equal(
+    internals.reportIssue({ lastIssue: { at: internals.LOADED_AT - 1, kind: 'timeout', error: '旧事' } }),
+    null,
+    '比这次加载还早的都不算这一轮的事')
+  assert.equal(bag.items.length, 0)
+  assert.ok(internals.reportIssue({ lastIssue: { at: internals.LOADED_AT + 1, kind: 'timeout' } }), '这一轮的才算')
+
+  bag.items = []
+  bag.seenAt = 0
+})
+
+test('toast：最多留三条，能点掉，关不存在的 id 不许有副作用', () => {
+  const bag = internals.toastBag()
+  bag.items = []
+  bag.seenAt = 0
+
+  for (let i = 0; i < 5; i += 1) internals.pushToast({ kind: 'llm-failed', detail: `第 ${i} 条` })
+  assert.equal(bag.items.length, 3, '一屏堆满提示等于什么都没说')
+  assert.ok(bag.items[2].detail.includes('第 4 条'), '留的是最新的几条')
+
+  internals.dismissToast(bag.items[0].id)
+  assert.equal(bag.items.length, 2)
+  internals.dismissToast(999999)
+  assert.equal(bag.items.length, 2)
+
+  bag.items = []
+  bag.seenAt = 0
+})
+
+test('toast 渲染者：平时渲染 null，有事时把话说清楚', () => {
+  ReactStub.__forceOpenOnce = false
+  const Stack = internals.makeToastStack((key) => internals.DICT.zh[key] || key)
+  const bag = internals.toastBag()
+  bag.items = []
+  bag.seenAt = 0
+
+  assert.equal(Stack({}), null, 'overlay 是 frame 级的：没内容时必须整块不渲染')
+
+  internals.pushToast({ kind: 'timeout', detail: 'AbortError: timed out' })
+  const tree = Stack({})
+  const texts = textsOf(tree).join(' | ')
+  assert.equal(tree.props.className, 'ph-toasts')
+  assert.ok(texts.includes(internals.DICT.zh.toastTimeout), `超时要单独说人话：${texts}`)
+  assert.ok(texts.includes('AbortError'), '原因要带上，不然只知道出事、不知道出了什么事')
+  assert.ok(texts.includes(internals.DICT.zh.toastDismiss), '得能点掉')
+  assert.ok(internals.CSS.includes('.ph-toasts'), 'CSS 里必须真有这一块，不然渲染出来是散的')
+
+  bag.items = []
+  bag.seenAt = 0
+})
+
+test('toast 生产者：没有 useSession 的老客户端上整个不渲染（hook 规则）', () => {
+  const Producer = internals.makeToastProducer((key) => key)
+  assert.equal(Producer({}), null)
+  assert.equal(Producer({ useSession: 'not-a-function' }), null)
+  const tree = Producer({ useSession: () => false })
+  assert.ok(tree && typeof tree.type === 'function', '有 useSession 时才把真正的生产者挂上去')
+})
+
+test('toast：用户自己撤回的回合不弹（不许把责任推给模型）', () => {
+  const bag = internals.toastBag()
+  bag.items = []
+  bag.seenAt = 0
+
+  assert.equal(
+    internals.reportIssue({ lastIssue: { at: internals.LOADED_AT + 5, kind: 'aborted', error: 'boom' } }),
+    null,
+    '撤回是用户按的，不是模型出错')
+  assert.equal(bag.items.length, 0)
+  assert.equal(bag.seenAt, internals.LOADED_AT + 5, '水位线照样推进，免得以后翻旧账')
+
+  bag.items = []
+  bag.seenAt = 0
 })
