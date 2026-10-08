@@ -423,7 +423,20 @@ function makeSilentAbortLlm() {
           resolve()
           return
         }
-        signal.addEventListener('abort', () => resolve(), { once: true })
+        // `AbortSignal.timeout()` 的定时器是 **unref** 的。这条用例里假 llm 要等信号触发才肯
+        // 结束，中间事件循环就没别的活干了 —— 进程会在信号触发前直接退出，node 20/22 的测试
+        // 运行器于是判定 "Promise resolution is still pending but the event loop has already
+        // resolved"，整条文件从这条用例起全部作废（cancelledByParent）。真机上是长活进程，
+        // 循环里总有别的活，所以这是用例对环境的隐含假设，不是产品缺陷。
+        //
+        // 兜底挂一个 ref 的定时器把循环撑到信号触发为止（200ms 远大于用例里的 1ms 超时）。
+        // 它只撑时间、不改归因：信号真没来，插件仍会按「空流且未中断」归成 llm-failed，
+        // 断言照样红，而不是把整条文件挂死。
+        const keepAlive = setTimeout(resolve, 200)
+        signal.addEventListener('abort', () => {
+          clearTimeout(keepAlive)
+          resolve()
+        }, { once: true })
       })
     },
   }
