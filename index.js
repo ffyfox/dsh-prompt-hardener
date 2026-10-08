@@ -15,6 +15,11 @@
  *    过来（见 `migrateDataDirectory`），所以改名不会丢用户手改的 prompt.md 和开关状态。
  * 4. **给浏览器半边供数**。注册一条 `webServer` 路由，供输入框控制条读写状态。
  *
+ * 一个"就这一次"的入口（见 `lib/triggers.js`）：
+ * - `!!` / `！！` 开头 = 本条强制改写（连"看着已经够硬"也压过去），`??` / `？？` 开头 = 本条原样放行。
+ *   前缀只在插件开着时被解释，且一定会从正文里剥掉 —— 半角、全角都必须自成一段
+ *   （后面跟空白或行尾），紧贴文字的符号一律当原文，详细取舍写在那个模块里。
+ *
  * 三条实现纪律：
  * - 只改写 `source.kind === 'user'` 的消息。子代理提示词、插件注入的上下文、
  *   运行时挂上来的 context 消息一律不碰。
@@ -34,6 +39,7 @@ import { fileURLToPath } from 'node:url'
 
 import { INTENSITIES, assembleFallback, normalizeIntensity } from './lib/fallback.js'
 import { looksHardman } from './lib/phrases.js'
+import { parseTrigger } from './lib/triggers.js'
 
 /** Cordis 插件名。也是浏览器半边模块表的 key。 */
 export const name = 'prompt-hardener'
@@ -614,6 +620,38 @@ async function rewriteText(ctx, agent, text, options) {
   return { text: candidate, changed: true, source, error, meta: null }
 }
 
+/**
+ * 一条用户正文的"这一条该怎么办"。
+ *
+ * **pre-step 与审查卡片共用这一条**，理由和 `rewriteText` 一样：两边各写一份迟早漂移，
+ * 而"卡片上看到的"与"不审查直接发出去得到的"必须是同一个东西。
+ *
+ * 两条判定顺序是有意的：
+ * 1. 先剥前缀 —— 后面所有判断、连同比对放行登记，用的都是**剥掉之后**的正文。
+ * 2. `??` 直接跳过，连 `!!` 都压不过它（同一条消息上两个前缀不会同时命中，见 triggers.js）。
+ *
+ * @param {string} text 用户原话（**还没剥前缀**）。
+ * @param {object} current 当前状态。
+ * @returns {{ body: string, trigger: string|null, skip: boolean, force: boolean,
+ *   intensity: string, stripped: boolean }}
+ *   `intensity` 是这一条实际要用的档位（就是插件当前那一档）。
+ */
+function planForText(text, current) {
+  const parsed = parseTrigger(text)
+  const stripped = parsed.trigger !== null
+  const body = stripped ? parsed.text : text
+  const intensity = normalizeIntensity(current.intensity)
+
+  return {
+    body,
+    trigger: parsed.trigger,
+    skip: parsed.skip,
+    force: parsed.force,
+    intensity,
+    stripped,
+  }
+}
+
 /** 用原生 req/res 读 JSON 请求体（不引入任何依赖）。 */
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -914,7 +952,10 @@ export function apply(ctx, config) {
       const messages = Array.isArray(decision.messages) ? decision.messages : []
       const prompt = resolvePrompt()
       let usedLlm = false
-      let changed = false
+      /** 有消息被换掉（改写，或者只是剥掉了前缀）—— 决定要不要回传新的 messages。 */
+      let mutated = false
+      /** 真的有消息被改写 —— 只影响 `stats.rewrites`，剥前缀不算改写。 */
+      let rewrote = false
       const out = []
       /** 本轮累积的统计补丁。 */
       const stat = {}
@@ -929,21 +970,47 @@ export function apply(ctx, config) {
           out.push(message)
           continue
         }
-        if (consumeReleased(collected.text)) {
+        const plan = planForText(collected.text, current)
+
+        /**
+         * 把这条消息放回结果。`replacement` 是字符串时换掉正文（剥前缀 / 改写），
+         * 否则原样放回 —— 注意"原样"是**真的原对象**，一个字节都不动。
+         */
+        const emit = (replacement) => {
+          if (typeof replacement !== 'string') {
+            out.push(message)
+            return
+          }
+          out.push(replaceText(message, collected, replacement))
+          mutated = true
+        }
+
+        // 放行登记按**原话与剥掉前缀那份**各认一次：审查卡片上点"按原文发出"时发的是
+        // 用户原话（可能带 `??`），而卡片自己的改写走的是剥掉前缀那份，两份都得认。
+        const released = consumeReleased(collected.text) || (plan.stripped && consumeReleased(plan.body))
+        if (released) {
           // 审查模式下用户刚在卡片上确认过的**定稿**：模型已经改写过了，不能再改写一遍。
           //
           // 这里绝不能指望 looksHardman 兜底：用户手工把定稿改温和的时候它判不出来，
           // 那样就会静默覆盖用户的编辑 —— 而"能改"正是这个功能存在的理由。
           stat.reviewReleased = Number(stat.reviewReleased || 0) + 1
           stat.lastSkip = 'review-released'
-          out.push(message)
+          emit(plan.stripped ? plan.body : undefined)
           continue
         }
-        if (looksHardman(collected.text)) {
+        if (plan.skip) {
+          stat.skipped = Number(stat.skipped || 0) + 1
+          stat.lastSkip = 'trigger-skip'
+          stat.lastTrigger = plan.trigger
+          emit(plan.stripped ? plan.body : undefined)
+          continue
+        }
+        if (!plan.force && looksHardman(plan.body)) {
           // 用户自己就写得很硬，别再套一层，也省一次模型调用。
+          // `!!` 是例外：那是"我知道它看着已经够硬了，我还是要重写"的明确命令。
           stat.skipped = Number(stat.skipped || 0) + 1
           stat.lastSkip = 'already-hardman'
-          out.push(message)
+          emit(plan.stripped ? plan.body : undefined)
           continue
         }
 
@@ -953,9 +1020,9 @@ export function apply(ctx, config) {
         const allowLlm = !usedLlm
         usedLlm = true
 
-        const outcome = await rewriteText(ctx, payload.agent, collected.text, {
+        const outcome = await rewriteText(ctx, payload.agent, plan.body, {
           llm: current.llm,
-          intensity: current.intensity,
+          intensity: plan.intensity,
           prompt: prompt.text,
           signal: payload.signal,
           allowLlm,
@@ -968,7 +1035,7 @@ export function apply(ctx, config) {
 
         if (!outcome.changed) {
           stat.skipped = Number(stat.skipped || 0) + 1
-          out.push(message)
+          emit(plan.stripped ? plan.body : undefined)
           continue
         }
 
@@ -978,13 +1045,14 @@ export function apply(ctx, config) {
           stat.lastIntensity = outcome.meta.intensity
         }
 
-        changed = true
-        out.push(replaceText(message, collected, outcome.text))
+        rewrote = true
+        emit(outcome.text)
         stat.lastSource = outcome.source
         stat.lastChars = outcome.text.length
-        stat.originalChars = collected.text.length
+        stat.originalChars = plan.body.length
         stat.lastPromptSource = prompt.source
         stat.lastPromptChars = prompt.chars
+        if (plan.trigger) stat.lastTrigger = plan.trigger
       }
 
       if (Object.keys(stat).length > 0) {
@@ -993,13 +1061,13 @@ export function apply(ctx, config) {
           stats: {
             ...state.stats,
             ...stat,
-            rewrites: Number(state.stats.rewrites || 0) + (changed ? 1 : 0),
-            ...(changed ? { lastAt: Date.now() } : {}),
+            rewrites: Number(state.stats.rewrites || 0) + (rewrote ? 1 : 0),
+            ...(rewrote ? { lastAt: Date.now() } : {}),
           },
         }
         void persist()
       }
-      if (!changed) return decision
+      if (!mutated) return decision
       return { ...decision, messages: out }
     })
     return () => dispose()
@@ -1139,20 +1207,39 @@ export function apply(ctx, config) {
             send(200, { ok: true, skipped: 'disabled', changed: false, text, source: null })
             return
           }
-          if (looksHardman(text)) {
-            state = { ...state, stats: { ...state.stats, ...patch, lastSkip: 'already-hardman' } }
+          // 和 pre-step 共用同一条判定：卡片上看到的必须是"不审查直接发出去"会得到的那个东西。
+          const plan = planForText(text, current)
+          /** 跳过时回给卡片的是**剥掉前缀那份**，它会原样发出去（见 client 的 release）。 */
+          const skip = (reason) => {
+            state = {
+              ...state,
+              stats: {
+                ...state.stats,
+                ...patch,
+                lastSkip: reason,
+                ...(plan.trigger ? { lastTrigger: plan.trigger } : {}),
+              },
+            }
             void persist()
-            send(200, { ok: true, skipped: 'already-hardman', changed: false, text, source: null })
+            send(200, { ok: true, skipped: reason, changed: false, text: plan.body, source: null })
+          }
+
+          if (plan.skip) {
+            skip('trigger-skip')
+            return
+          }
+          if (!plan.force && looksHardman(plan.body)) {
+            skip('already-hardman')
             return
           }
 
           const prompt = resolvePrompt()
           const route = reviewRoute(ctx, current.llm)
-          const outcome = await rewriteText(ctx, null, text, {
+          const outcome = await rewriteText(ctx, null, plan.body, {
             // 路由在这里是**显式**给全的：`resolveRoute` 见到成对的 provider/model 就直接返回，
             // 不需要（也没有）一个 agent 来兜底。
             llm: { ...current.llm, provider: route.provider, model: route.model },
-            intensity: current.intensity,
+            intensity: plan.intensity,
             prompt: prompt.text,
             seed: `review|${Date.now()}`,
           })
@@ -1163,6 +1250,7 @@ export function apply(ctx, config) {
               ...state.stats,
               ...patch,
               ...(outcome.error ? { lastError: outcome.error } : {}),
+              ...(plan.trigger ? { lastTrigger: plan.trigger } : {}),
               lastReviewSource: outcome.source,
               lastReviewChanged: outcome.changed,
             },
@@ -1175,6 +1263,7 @@ export function apply(ctx, config) {
             source: outcome.source,
             error: outcome.error ?? null,
             promptSource: prompt.source,
+            intensity: plan.intensity,
           })
           return
         }

@@ -349,6 +349,25 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
       return data && data.ok ? data.state : null
     }
 
+    /**
+     * 卡片上"跳过改写、直接发出"时，到底该发哪一份正文。
+     *
+     * host 回的那份（`data.text`）已经洗过一遍：`!!` / `??` 前缀被剥掉了，正文也按
+     * 触发前缀的语义处理过。草稿里那份还带着暗号 —— 发草稿等于把 `??` 塞进对话。
+     * 只有读不到 host 那份时才退回草稿（老宿主 / 半截响应）。
+     *
+     * 单独拎成纯函数是因为它错起来**特别安静**：消息照样发出去了，只是内容不对，
+     * 而没有任何一处会抛。
+     *
+     * @param {object} data host 的响应体。
+     * @param {string} draft 输入框里那份。
+     * @returns {string} 真正要发出去的正文。
+     */
+    function releaseTextFor(data, draft) {
+      if (data && typeof data.text === 'string' && data.text.length > 0) return data.text
+      return typeof draft === 'string' ? draft : ''
+    }
+
     /* ─────────────────────────── 审查态（每会话一份） ─────────────────────────── */
 
     /**
@@ -724,9 +743,10 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
               // 用户已经撤回或换了另一条：这张卡过期了，什么都不做。
               if (!stillMine()) return
               if (typeof data.skipped === 'string' && data.skipped.length > 0) {
-                // 没东西可审（插件关了 / 火力关了 / 本来就够硬）—— 直接按原文发出，
-                // 别拿一张"其实没改"的卡片耽误人。
-                release(text)
+                // 没东西可审（插件关了 / 火力关了 / 本来就够硬 / 命中 `??`）—— 直接按原文发出，
+                // 别拿一张"其实没改"的卡片耽误人。发的是 host 洗过的那份，不是草稿：
+                // 草稿里还带着 `??` 这类暗号（见 releaseTextFor）。
+                release(releaseTextFor(data, text))
                 return
               }
               if (data.changed !== true) {
@@ -1041,6 +1061,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
        */
       __internals: {
         createSendGuards,
+        releaseTextFor,
         holdBag,
         readHold,
         writeHold,

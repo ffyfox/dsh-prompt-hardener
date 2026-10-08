@@ -883,6 +883,178 @@ test('放行登记不跨实例：HMR 换了实例，旧登记不生效', async (
   assert.equal(out.messages[0].content[0].text, '改写结果', '新实例不认旧实例的登记')
 })
 
+/* ─────────────────── 触发前缀：半角全角一律要自成一段 ─────────────────── */
+
+/** 等一小会儿，让 `persist()` 把统计落盘。 */
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('触发前缀 ??：不改写、不烧模型调用，而且暗号必须被剥掉', async () => {
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  const out = await runPreStep(listeners, message([{ type: 'text', text: '?? 这句原样发出去' }]))
+  assert.equal(llm.calls.length, 0, '?? 就不该烧一次调用')
+  assert.equal(out.messages[0].content[0].text, '这句原样发出去')
+  assert.equal(out.messages[0].source.rpcId, 'rpc-9', '换正文不许丢 source')
+
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastSkip, 'trigger-skip')
+  assert.equal(stats.lastTrigger, '??')
+  assert.equal(stats.rewrites || 0, 0, '剥个前缀不算一次改写')
+})
+
+test('触发前缀 !!：哪怕这条看着已经够硬，也照样强制改写', async () => {
+  // 这是 `!!` 的独有作用：平时"看着已经够硬"的消息会被跳过，`!!` 要求这条必须改。
+  const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
+  const llm = makeLlm(['强制改写结果'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'light' })
+
+  const plain = await runPreStep(listeners, message([{ type: 'text', text: hardman }]))
+  assert.equal(llm.calls.length, 0, '不带暗号时，已经够硬的消息不烧模型')
+  assert.equal(plain.messages[0].content[0].text, hardman, '原样放回')
+
+  const forced = await runPreStep(listeners, message([{ type: 'text', text: `!! ${hardman}` }]))
+  assert.equal(llm.calls.length, 1, '!! 要绕过"已经很硬"那道跳过')
+  assert.equal(forced.messages[0].content[0].text, '强制改写结果')
+  assert.equal(llm.calls[0].messages[0].content[0].text, hardman, '暗号不许进模型')
+  assert.ok(llm.calls[0].system.includes('本次改写强度：轻'), '强度就按当前档位')
+})
+
+test('触发前缀只在插件开着时被解释：关掉之后那就是用户的正文', async () => {
+  const llm = makeLlm(['x'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: false, intensity: 'standard' })
+
+  const out = await runPreStep(listeners, message([{ type: 'text', text: '?? 这句原样发出去' }]))
+  assert.equal(llm.calls.length, 0)
+  assert.equal(out.messages[0].content[0].text, '?? 这句原样发出去', '插件关着，一个字都不许动')
+})
+
+test('放行登记两种形态都认：带暗号的原文与剥掉暗号的正文', async () => {
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners, routes } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  // 审查卡片上点"按原文发出"时，发出去的可能是带 `??` 的原话。
+  await callRoute(routes, mod.REVIEW_ROUTE, { method: 'PUT', body: { text: '?? 这句原样发出去' } })
+  const out = await runPreStep(listeners, message([{ type: 'text', text: '?? 这句原样发出去' }]))
+  assert.equal(llm.calls.length, 0, '确认过的定稿不许被改写第二遍')
+  assert.equal(out.messages[0].content[0].text, '这句原样发出去', '免检的同时暗号照样要剥掉')
+})
+
+test('审查路由上的触发前缀：回给卡片的是剥掉暗号那份，!! 照样强制改写', async () => {
+  // 浏览器半边跳过改写时会直接发出 host 回的那份正文（见 client 的 releaseTextFor）。
+  // 这里要是回了原话，`??` 就会跟着消息进对话 —— 用户看不见，模型看得见。
+  const skipLlm = makeLlm(['不该被调用'])
+  const skipped = makeCtx(skipLlm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(skipped.ctx, { enabled: true, intensity: 'standard', mode: 'review' })
+
+  const skip = await callRoute(skipped.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: '?? 这句原样发出去' } })
+  assert.equal(skip.status, 200)
+  assert.equal(skip.body.skipped, 'trigger-skip')
+  assert.equal(skip.body.changed, false)
+  assert.equal(skip.body.text, '这句原样发出去', '回给卡片的是剥掉暗号那份')
+  assert.equal(skipLlm.calls.length, 0, '?? 不走模型')
+  await wait(30)
+  assert.equal(JSON.parse(await readFile(stateFile(), 'utf8')).stats.lastTrigger, '??')
+
+  // 卡片这条路也要认 `!!`：拿一条"本来会被跳过"的硬汉消息来验。
+  const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
+  const forceLlm = makeLlm(['强制改写结果'])
+  const forced = makeCtx(forceLlm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(forced.ctx, { enabled: true, intensity: 'light', mode: 'review' })
+
+  const answer = await callRoute(forced.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: `!! ${hardman}` } })
+  assert.equal(answer.body.changed, true, '!! 在审查路由上同样要绕过"已经很硬"的跳过')
+  assert.equal(answer.body.intensity, 'light')
+  assert.equal(forceLlm.calls[0].messages[0].content[0].text, hardman, '暗号不许进模型')
+})
+
+test('全角前缀也要自成一段：紧贴不算暗号，隔了空白才算', async () => {
+  // 紧贴：`？？这句原样发出去` 就是一条普通消息，一个字都不许吃。
+  const gluedRaw = '？？这句原样发出去'
+  const gluedLlm = makeLlm(['改写结果'])
+  const glued = makeCtx(gluedLlm)
+  await boot(glued.ctx, { enabled: true, intensity: 'standard' })
+  const passed = await runPreStep(glued.listeners, message([{ type: 'text', text: gluedRaw }]))
+  assert.equal(gluedLlm.calls.length, 1, '紧贴的 ？？ 不是暗号，该走正常改写')
+  assert.equal(gluedLlm.calls[0].messages[0].content[0].text, gluedRaw, '紧贴时一个字都不许吃')
+  assert.equal(passed.messages[0].content[0].text, '改写结果')
+
+  // 隔一个空格：才算暗号 —— 原样放行、不烧调用、前缀剥掉。
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+  const out = await runPreStep(listeners, message([{ type: 'text', text: '？？ 这句原样发出去' }]))
+  assert.equal(llm.calls.length, 0, '？？ 不该烧模型调用')
+  assert.equal(out.messages[0].content[0].text, '这句原样发出去', '全角暗号必须被剥掉')
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastTrigger, '？？')
+  assert.equal(stats.lastSkip, 'trigger-skip')
+
+  // ！！ 同样：空一格才绕过"已经很硬"那道跳过，强度按当前档位。
+  const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
+  const forcedLlm = makeLlm(['强制改写结果'])
+  const forced = makeCtx(forcedLlm)
+  await boot(forced.ctx, { enabled: true, intensity: 'light' })
+  const hit = await runPreStep(forced.listeners, message([{ type: 'text', text: `！！ ${hardman}` }]))
+  assert.equal(forcedLlm.calls.length, 1, '！！要绕过"已经很硬"的跳过')
+  assert.equal(forcedLlm.calls[0].messages[0].content[0].text, hardman, '全角暗号不许进模型')
+  assert.ok(forcedLlm.calls[0].system.includes('本次改写强度：轻'))
+  assert.equal(hit.messages[0].content[0].text, '强制改写结果')
+})
+
+test('紧贴不算暗号：那两个字要原样进模型（半角全角都是）', async () => {
+  for (const raw of ['!!important 这个怎么写', '！！important 这个怎么写', '？？这句别改']) {
+    const llm = makeLlm(['改写结果'])
+    const { ctx, listeners } = makeCtx(llm)
+    await boot(ctx, { enabled: true, intensity: 'standard' })
+
+    const out = await runPreStep(listeners, message([{ type: 'text', text: raw }]))
+    assert.equal(llm.calls.length, 1, `${raw} 不是暗号，就是一条普通消息`)
+    assert.equal(llm.calls[0].messages[0].content[0].text, raw, '紧贴时一个字都不许吃')
+    assert.equal(out.messages[0].content[0].text, '改写结果')
+  }
+})
+
+test('审查路由同样只认自成一段的暗号（全角紧贴当原文）', async () => {
+  // 紧贴：不是暗号 ⇒ 走正常改写，回给卡片的候选里那几个符号还在。
+  const gluedLlm = makeLlm(['改写结果'])
+  const glued = makeCtx(gluedLlm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(glued.ctx, { enabled: true, intensity: 'standard', mode: 'review' })
+  const gluedRaw = '？？这句原样发出去'
+  const answered = await callRoute(glued.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: gluedRaw } })
+  assert.equal(answered.body.changed, true, '紧贴的 ？？ 不是暗号，卡片该给改写候选')
+  assert.equal(gluedLlm.calls[0].messages[0].content[0].text, gluedRaw, '紧贴时一个字都不许吃')
+
+  // 隔空白：跳过 —— 回给卡片的是剥掉暗号那份。
+  const skipLlm = makeLlm(['不该被调用'])
+  const skipped = makeCtx(skipLlm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(skipped.ctx, { enabled: true, intensity: 'standard', mode: 'review' })
+
+  const skip = await callRoute(skipped.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: '？？ 这句原样发出去' } })
+  assert.equal(skip.status, 200)
+  assert.equal(skip.body.skipped, 'trigger-skip')
+  assert.equal(skip.body.text, '这句原样发出去', '卡片放行时发的是剥掉全角暗号那份')
+  assert.equal(skipLlm.calls.length, 0)
+  await wait(30)
+  assert.equal(JSON.parse(await readFile(stateFile(), 'utf8')).stats.lastTrigger, '？？')
+
+  const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
+  const forceLlm = makeLlm(['强制改写结果'])
+  const forced = makeCtx(forceLlm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(forced.ctx, { enabled: true, intensity: 'light', mode: 'review' })
+
+  const answer = await callRoute(forced.routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: `！！ ${hardman}` } })
+  assert.equal(answer.body.changed, true, '！！在审查路由上同样要绕过"已经很硬"的跳过')
+  assert.equal(answer.body.intensity, 'light')
+  assert.equal(forceLlm.calls[0].messages[0].content[0].text, hardman, '全角暗号不许进模型')
+})
+
 test('回归：迁移过来的设置必须真的被读进来，不许被出厂默认覆盖写掉', async () => {
   // 真机实测踩到（2026-10-02）：迁移和"读状态文件"是同时起跑的，而迁移是异步改名。
   // 读盘那一刻新路径上还是空的 ⇒ 读到 ENOENT ⇒ 内存里是**出厂默认**（intensity=standard、

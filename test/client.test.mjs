@@ -664,3 +664,15 @@ test('样式表：主按钮悬停不许被通用悬停洗白；药丸无边框�
   assert.ok(seat, '缺少"卡片打开时抬高输入框底栏"的规则（会被滚动到底部按钮压住）')
   assert.ok(Number(seat[1]) > 8, `底栏 z-index 必须高于滚动到底部槽位的 8，实际 ${seat[1]}`)
 })
+
+/* ───────────────── 放行哪一份正文（触发前缀的暗号不许进对话） ───────────────── */
+
+test('放行时发 host 洗过的那份：草稿里的 `??` 不许跟着消息进对话', () => {
+  // 这个判据错起来**特别安静**：消息照样发出去了，只是正文不对，没有任何一处会抛。
+  assert.equal(internals.releaseTextFor({ text: '剥掉暗号' }, '?? 剥掉暗号'), '剥掉暗号')
+  assert.equal(internals.releaseTextFor({ text: '' }, '草稿'), '草稿', '空串不算数，退回草稿')
+  assert.equal(internals.releaseTextFor({}, '草稿'), '草稿')
+  assert.equal(internals.releaseTextFor(null, '草稿'), '草稿')
+  assert.equal(internals.releaseTextFor({ text: 'x' }, undefined), 'x')
+  assert.equal(internals.releaseTextFor(null, undefined), '', '两边都没有就是空串，不许是 undefined')
+})
