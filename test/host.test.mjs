@@ -953,8 +953,33 @@ test('放行登记不跨实例：HMR 换了实例，旧登记不生效', async (
 
 /* ─────────────────────────── 触发前缀 ─────────────────────────── */
 
-/** 等一小会儿，让 `persist()` 把统计落盘。 */
+/** 等一小会儿。 */
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * 等 `persist()` 把统计落盘，返回落盘后的 `stats`。
+ *
+ * **不能固定睡一小段再去读**：`persist()` 是 fire-and-forget 的链式写（mkdir → write → rename），
+ * 连着处理几条消息时它们排队落盘；慢机器上（CI 的 node 24 那台）睡 30ms 会读到上一条的统计，
+ * 甚至文件还没建出来。这里轮询到**期望的那一项真的出现**为止，超时才失败 —— 断言强度一点没降，
+ * 只是不再赌调度。
+ *
+ * @param {(stats: object) => boolean} expected 期望落盘的统计。
+ * @param {number} [timeoutMs] 上限。
+ * @returns {Promise<object>} 落盘后的 `stats`。
+ */
+async function waitForStats(expected, timeoutMs = 3000) {
+  const started = Date.now()
+  let last = null
+  while (Date.now() - started < timeoutMs) {
+    last = await readFile(stateFile(), 'utf8')
+      .then((raw) => JSON.parse(raw).stats)
+      .catch(() => null)
+    if (last && expected(last)) return last
+    await wait(15)
+  }
+  assert.fail(`等状态落盘超时（${timeoutMs}ms）；最后读到：${JSON.stringify(last)}`)
+}
 
 test('触发前缀 ??：不改写、不烧模型调用，而且暗号必须被剥掉', async () => {
   const llm = makeLlm(['不该被调用'])
@@ -966,8 +991,7 @@ test('触发前缀 ??：不改写、不烧模型调用，而且暗号必须被�
   assert.equal(out.messages[0].content[0].text, '这句原样发出去')
   assert.equal(out.messages[0].source.rpcId, 'rpc-9', '换正文不许丢 source')
 
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastSkip === 'trigger-skip' && s.lastTrigger === '??')
   assert.equal(stats.lastSkip, 'trigger-skip')
   assert.equal(stats.lastTrigger, '??')
   assert.equal(stats.rewrites || 0, 0, '剥个前缀不算一次改写')
@@ -1026,8 +1050,7 @@ test('审查路由上的触发前缀：回给卡片的是剥掉暗号那份，!!
   assert.equal(skip.body.changed, false)
   assert.equal(skip.body.text, '这句原样发出去', '回给卡片的是剥掉暗号那份')
   assert.equal(skipLlm.calls.length, 0, '?? 不走模型')
-  await wait(30)
-  assert.equal(JSON.parse(await readFile(stateFile(), 'utf8')).stats.lastTrigger, '??')
+  assert.equal((await waitForStats((s) => s.lastTrigger === '??')).lastTrigger, '??')
 
   // 卡片这条路也要认 `!!`：拿一条"本来会被跳过"的硬汉消息来验。
   const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
@@ -1065,8 +1088,7 @@ test('打开之后：没有内容的消息不调模型，一个字节都不动',
   }
   assert.equal(llm.calls.length, 0)
 
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastGate === 'pure-symbol')
   assert.equal(stats.lastSkip, 'no-content')
   assert.equal(stats.lastGate, 'pure-symbol', '判据命中的理由要留下（这批最后一条是 `1.`）')
   assert.equal(stats.rewrites || 0, 0, '没改写就不算一次改写')
@@ -1145,8 +1167,7 @@ test('模型失败时留下 lastIssue，浏览器半边据此弹一次提示', a
   await boot(ctx, { enabled: true, intensity: 'standard' })
 
   await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]))
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastError === 'boom' && s.lastIssue && s.lastIssue.kind === 'llm-failed')
   assert.equal(stats.lastError, 'boom')
   assert.equal(stats.lastSource, 'rules-fallback')
   assert.equal(stats.lastIssue.kind, 'llm-failed')
@@ -1164,8 +1185,7 @@ test('超时归因：宿主把中断消化成空流，也要认成 timeout', asy
   await boot(ctx, { enabled: true, intensity: 'standard', llm: { timeoutMs: 1 } })
 
   await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]))
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastIssue && s.lastIssue.kind === 'timeout')
   assert.equal(llm.calls, 1)
   assert.equal(stats.lastIssue.kind, 'timeout')
   assert.ok(/timed out/.test(stats.lastIssue.error), `文案要自己说清是超时：${stats.lastIssue.error}`)
@@ -1185,8 +1205,7 @@ test('没有模型路由时归成 no-route：说成「模型没出力」会让�
   await handler({ agent: undefined, messages: [msg], turn: 1, step: 1 }, async () => decision)
 
   assert.equal(llm.calls.length, 0, '没有路由，一次都不该调模型')
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastIssue && s.lastIssue.kind === 'no-route')
   assert.equal(stats.lastIssue.kind, 'no-route')
   assert.ok(/route/.test(stats.lastIssue.error), `原文要留着，便于排查：${stats.lastIssue.error}`)
   assert.equal(stats.lastSource, 'rules-fallback')
@@ -1203,8 +1222,7 @@ test('规则也改不动的时候：原话原样发出，但提示照弹（`!!` 
 
   const out = await runPreStep(listeners, message([{ type: 'text', text: `!! ${hardman}` }]))
   assert.equal(out.messages[0].content[0].text, hardman, '规则也改不动 ⇒ 按剥掉前缀的原话发出')
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastIssue && s.lastIssue.kind === 'llm-failed')
   assert.equal(stats.lastIssue.kind, 'llm-failed', '出过事就要留证据，toast 靠它弹')
   assert.equal(stats.rewrites || 0, 0, '一个字都没改，不该算一次改写')
 })
@@ -1215,8 +1233,7 @@ test('用户撤回的回合归成 aborted：不许栽赃给模型', async () => 
   await boot(ctx, { enabled: true, intensity: 'standard' })
 
   await runPreStep(listeners, message([{ type: 'text', text: '帮我写个脚本' }]), AbortSignal.abort())
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastIssue && s.lastIssue.kind === 'aborted')
   assert.equal(stats.lastIssue.kind, 'aborted')
   assert.equal(stats.lastSource, 'rules-fallback')
 })
@@ -1241,8 +1258,7 @@ test('全角前缀也要自成一段：紧贴不算暗号，隔了空白才算',
   const out = await runPreStep(listeners, message([{ type: 'text', text: '？？ 这句原样发出去' }]))
   assert.equal(llm.calls.length, 0, '？？ 不该烧模型调用')
   assert.equal(out.messages[0].content[0].text, '这句原样发出去', '全角暗号必须被剥掉')
-  await wait(30)
-  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  const stats = await waitForStats((s) => s.lastTrigger === '？？' && s.lastSkip === 'trigger-skip')
   assert.equal(stats.lastTrigger, '？？')
   assert.equal(stats.lastSkip, 'trigger-skip')
 
@@ -1291,8 +1307,7 @@ test('审查路由同样只认自成一段的暗号（全角紧贴当原文）',
   assert.equal(skip.body.skipped, 'trigger-skip')
   assert.equal(skip.body.text, '这句原样发出去', '卡片放行时发的是剥掉全角暗号那份')
   assert.equal(skipLlm.calls.length, 0)
-  await wait(30)
-  assert.equal(JSON.parse(await readFile(stateFile(), 'utf8')).stats.lastTrigger, '？？')
+  assert.equal((await waitForStats((s) => s.lastTrigger === '？？')).lastTrigger, '？？')
 
   const hardman = '老哥们，搞快点，别引入墨迹的独立审查，肌肉集团冲冲冲！'
   const forceLlm = makeLlm(['强制改写结果'])
