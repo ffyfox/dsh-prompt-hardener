@@ -34,7 +34,7 @@ window.__ModuleLoader__.load({
     /** 语言域命名空间。 */
     const NS = 'prompt-hardener'
 
-    /** 两档发送模式：自动（老行为）/ 审查（先过一眼）。 */
+    /** 两档发送模式：自动（直接发）/ 审查（先过一眼）。 */
     const MODES = ['auto', 'review']
 
     /**
@@ -96,11 +96,17 @@ window.__ModuleLoader__.load({
         mode: '发送',
         auto: '自动',
         review: '审查',
-        autoHint: '自动：点了发送就直接发出，改写发生在发出之后（老行为）',
+        autoHint: '自动：点了发送就直接发出，改写发生在发出之后',
         reviewHint: '审查：点了发送先弹卡片，能看能改，确认了才真发',
+        noContentSkip: '改写判断',
+        on: '开',
+        noContentSkipHint: '开启后，无内容的消息（如「继续」「好的」「？」）不再调用模型改写',
         reviewTitle: '硬邦邦审查！！！',
         rewriting: '改写中…',
         fromRules: '模型没出力，这是规则兜底',
+        notRewritten: '未改写',
+        notRewrittenHint: '本条按照规则没有调用模型改写，可强制改写',
+        force: '强制改写',
         originalLabel: '原文',
         /** 标签与内容之间的分隔符。中文用全角冒号，英文用半角的 `: `。 */
         sep: '：',
@@ -132,11 +138,17 @@ window.__ModuleLoader__.load({
         mode: 'Send',
         auto: 'Auto',
         review: 'Review',
-        autoHint: 'Auto: sends right away; the rewrite happens after the send (the old behaviour)',
+        autoHint: 'Auto: sends right away; the rewrite happens after the send',
         reviewHint: 'Review: opens a card first — read it, edit it, then send',
+        noContentSkip: 'Rewrite check',
+        on: 'On',
+        noContentSkipHint: 'When on, messages with no content (like "continue", "ok" or "?") are not sent to the model for a rewrite',
         reviewTitle: 'Muscle review!!!',
         rewriting: 'Rewriting…',
         fromRules: 'The model gave nothing; this is the rule-based fallback',
+        notRewritten: 'Not rewritten',
+        notRewrittenHint: 'By rule, no model call was made for this one; you can force a rewrite',
+        force: 'Force rewrite',
         originalLabel: 'Original',
         sep: ': ',
         failed: 'Rewrite failed',
@@ -276,6 +288,10 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
    这里多带一个类名让权重升一档（0,4,0），将来谁挪动规则顺序都不会再把它改坏。 */
 .ph-btn.ph-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
 .ph-err { color: var(--dsw-alias-label-error); line-height: 1.6; margin-bottom: 8px; word-break: break-word; }
+/* 「未改写」这枚徽标要压过"卡片弹出来 = 在改，等两秒"的下意识：别的徽标（改写中 / 发出中 /
+   规则兜底）是过程播报，扫一眼就够；这一枚是结论 —— 用正文的主字色，再与标题同重。
+   两级浅灰（三级 / 二级）在这里都不够：灰注释色天然读作"旁注"，没人会为它停一下。 */
+.ph-badge[data-strong="true"] { color: var(--dsw-alias-label-primary); font-weight: 600; }
 
 /* toast。挂在 shell.overlay —— 官方文档里那个位置的说明正好写着"a toast stack
    belongs here"。那一层本身是点击穿透的，所以自己这一块要把指针事件收回来。 */
@@ -429,6 +445,20 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
      */
     function cardVisible(hold) {
       return Boolean(hold) && hold.hidden !== true
+    }
+
+    /**
+     * 打给审查路由的请求体。
+     *
+     * `force` 是卡片上「强制改写」那条路：宿主据此压过改写判断，明确调一次模型。
+     * 单独拎成纯函数是因为它写错的后果很安静 —— 按钮看着按下了，卡片却又回到"未改写"。
+     *
+     * @param {string} text 要审的正文。
+     * @param {boolean} force 是否明确要求调模型。
+     * @returns {string} JSON 请求体。
+     */
+    function reviewBody(text, force) {
+      return JSON.stringify(force === true ? { text, force: true } : { text })
     }
 
     /**
@@ -765,6 +795,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           enabled: true,
           intensity: 'standard',
           mode: 'auto',
+          noContentSkip: false,
           llm: {},
           stats: {},
           prompt: {},
@@ -865,6 +896,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
 
         const level = state.enabled === false ? 'off' : (state.intensity || 'standard')
         const mode = MODES.includes(state.mode) ? state.mode : 'auto'
+        /** 改写判断的开关。宿主的 `sanitizeState` 保证它是布尔值，缺字段时就是关。 */
+        const noContentSkip = state.noContentSkip === true
 
         /* ─────────────────── 审查模式：拦下发送、放行定稿 ─────────────────── */
 
@@ -983,12 +1016,30 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
         /**
          * 开一张审查卡：立刻弹出来（先显示原文 + "改写中…"），再去问宿主。
          * 先弹后等是刻意的 —— 改写要几秒，不先弹的话用户点完发送只能干等。
+         *
+         * @param {string} text 要审的正文（卡片上的"原文"就是它）。
+         * @param {boolean} [force] 卡片上的「强制改写」：明确要求调一次模型。
          */
-        const startReview = React.useCallback((text) => {
-          const mine = { id: nextHoldId(), phase: 'working', original: text, text, source: null, error: '', startedAt: Date.now(), hidden: true }
+        const startReview = React.useCallback((text, force) => {
+          const forced = force === true
+          const mine = {
+            id: nextHoldId(),
+            phase: 'working',
+            original: text,
+            text,
+            source: null,
+            error: '',
+            /** 重试时要沿用：强制的卡重试仍然强制，否则又会被判成"没内容"。 */
+            force: forced,
+            startedAt: Date.now(),
+            // 「强制改写」是按在**已经露面的卡片**上的：这一条一定会去调模型，没有"秒回"
+            // 要躲，所以当场接着显示，别让它闪掉一帧再回来。
+            hidden: !forced,
+          }
           applyHold(mine)
           // 到点了才让卡片露面。抢在这之前回来的回答 —— 命中 `??` 放行、消息本来就够硬 ——
-          // 连一眼都不该看到它。
+          // 连一眼都不该看到它。（"未改写"那张卡是例外：它必须留下来，见下面判 `gated` 那段。
+          // 从卡片上按「强制改写」进来的这一趟也不躲，直接在 `hidden` 里定了。）
           const reveal = window.setTimeout(() => {
             const next = onReveal(readHold(sessionId), mine.id)
             if (next) applyHold(next)
@@ -1015,7 +1066,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
               const res = await fetch(REVIEW_ROUTE, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ text }),
+                body: reviewBody(text, forced),
                 ...(controller ? { signal: controller.signal } : {}),
               })
               const data = await res.json().catch(() => null)
@@ -1029,6 +1080,12 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
                 // 别拿一张"其实没改"的卡片耽误人。发的是 host 洗过的那份，不是草稿：
                 // 草稿里还带着 `??` 这类暗号（见 releaseTextFor）。
                 release(releaseTextFor(data, text))
+                return
+              }
+              if (data.gated) {
+                // 改写判断命中：这一条没调模型。**绝不能走 release()** —— 那会静默把
+                // 消息发出去，而它要留在卡片上：用户在卡片里可以直接「强制改写」。
+                applyHold({ ...mine, phase: 'gated', hidden: false })
                 return
               }
               if (data.changed !== true) {
@@ -1199,13 +1256,17 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
         if (showCard) {
           const mine = holdRef.current || hold
           const busy = mine.phase === 'working' || mine.phase === 'sending'
+          /** 改写判断命中：这一条没有可改写的内容，模型没被调用过。 */
+          const gated = mine.phase === 'gated'
           // 等了多久（`nowMs` 在等待期间每 500ms 推进一次）。
           const waited = mine.startedAt ? Math.max(0, Math.round((nowMs - mine.startedAt) / 1000)) : null
-          const badge = mine.phase === 'working'
-            ? `${t('rewriting')}${waited === null ? '' : ` ${waited}s`}`
-            : (mine.phase === 'sending'
-              ? `${t('sending')}${waited === null ? '' : ` ${waited}s`}`
-              : (mine.source === 'rules-fallback' ? t('fromRules') : ''))
+          const badge = gated
+            ? t('notRewritten')
+            : (mine.phase === 'working'
+              ? `${t('rewriting')}${waited === null ? '' : ` ${waited}s`}`
+              : (mine.phase === 'sending'
+                ? `${t('sending')}${waited === null ? '' : ` ${waited}s`}`
+                : (mine.source === 'rules-fallback' ? t('fromRules') : '')))
           // 卡片上不养闲字：字数统计那类信息不进卡片，高度留给正文输入框。
           // "运行中，将排队发出"也不写：客户端拿不到"当前回合在不在跑"的可信信号，
           // 那句在空闲时照样会显示 —— 界面宁可少说，也不能说错。
@@ -1213,7 +1274,15 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           const card = h('div', { className: 'ph-card', role: 'dialog', 'aria-label': t('reviewTitle') },
             h('div', { className: 'ph-cardtitle' },
               h('span', null, t('reviewTitle')),
-              badge ? h('span', { className: 'ph-badge' }, badge) : null),
+              // 「未改写」是唯一带悬停说明的徽标：它要说清"为什么没改"和"还能怎么改"。
+              // 也是唯一加粗的：它是结论，不是过程。
+              badge
+                ? h('span', {
+                  className: 'ph-badge',
+                  'data-strong': String(gated),
+                  title: gated ? t('notRewrittenHint') : null,
+                }, badge)
+                : null),
             h('div', { className: 'ph-orig' }, `${t('originalLabel')}${t('sep')}${mine.original}`),
             mine.phase === 'error' && (mine.error || mine.reason === 'interrupted')
               ? h('div', { className: 'ph-err' },
@@ -1240,12 +1309,21 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
                 className: 'ph-btn',
                 onClick: () => applyHold(null),
               }, t('cancel')),
+              // 没改写的那张卡上多一个出口：就在这儿要求调一次模型。
+              // 按钮不设禁用条件 —— 正文是几个符号也照样能强改，没有理由拦。
+              gated ? h('button', {
+                type: 'button',
+                className: 'ph-btn',
+                onClick: () => startReview(mine.text || mine.original, true),
+              }, t('force')) : null,
               mine.phase === 'error' ? h('button', {
                 type: 'button',
                 className: 'ph-btn',
-                onClick: () => startReview(mine.original),
+                // 重试沿用这张卡是不是强制的：强制的卡重试仍然强制，不然又会被判成"没内容"。
+                onClick: () => startReview(mine.original, mine.force),
               }, t('retry')) : null,
-              h('button', {
+              // 「未改写」的卡上不给"按原文发出"：那时正文就是它，与「发出」重复。
+              gated ? null : h('button', {
                 type: 'button',
                 className: 'ph-btn',
                 // 改写还在飞的时候也允许"按原文发出"：这是不等模型的逃生口，
@@ -1282,6 +1360,18 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           onClick: () => commit({ mode: id }),
         }, t(id))))
 
+        // 改写判断：布尔量，但用与上面两行同构的两段选择器 —— 面板就这么一套控件。
+        // 出厂是「关」，关着时宿主的判据完全不存在（见 index.js 的 planForText）。
+        const noContentSeg = h('div', { className: 'ph-seg' }, [true, false].map((on) => h('button', {
+          key: String(on),
+          type: 'button',
+          className: 'ph-segbtn',
+          'data-on': String(on === noContentSkip),
+          style: on === noContentSkip ? { background: 'var(--dsw-alias-brand-primary)' } : undefined,
+          title: t('noContentSkipHint'),
+          onClick: () => commit({ noContentSkip: on }),
+        }, t(on ? 'on' : 'off'))))
+
         const panelEl = h('div', { className: 'ph-panel', role: 'dialog', 'aria-label': t('title') },
           h('div', { className: 'ph-title' }, t('title')),
           h('div', { className: 'ph-hint' }, t('hint')),
@@ -1289,6 +1379,8 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
           seg,
           h('span', { className: 'ph-rowlabel', style: { marginTop: '10px' } }, t('mode')),
           modeSeg,
+          h('span', { className: 'ph-rowlabel', style: { marginTop: '10px' } }, t('noContentSkip')),
+          noContentSeg,
           // 面板上不养闲字：统计与提示词信息整块删除。
           // 只留这一行，而且只有真出问题时才出现（路由读不到 / 写不进去）。
           error ? h('div', { className: 'ph-warn' }, `${t('unreachable')}: ${error}`) : null)
@@ -1365,6 +1457,7 @@ body:has(.ph-root[data-card="true"]) [data-composer-seat] { z-index: 9; }
       __internals: {
         createSendGuards,
         releaseTextFor,
+        reviewBody,
         cardVisible,
         onReveal,
         CARD_DELAY_MS,

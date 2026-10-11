@@ -463,6 +463,14 @@ async function runPreStep(listeners, msg, signal = undefined) {
   return handler({ agent: AGENT, messages: [msg], turn: 2, step: 1, signal }, async () => decision)
 }
 
+/** 同上，一次带多条消息：用来验"这一轮只打一次模型调用"这类跨消息的规矩。 */
+async function runPreStepAll(listeners, messages) {
+  const handler = listeners.get('agent/pre-step')
+  assert.ok(handler, 'pre-step 监听器没有注册')
+  const decision = { kind: 'enter', messages }
+  return handler({ agent: AGENT, messages, turn: 2, step: 1 }, async () => decision)
+}
+
 /**
  * 把一次请求真的打给某条已注册路由。
  *
@@ -771,7 +779,7 @@ test('状态文件可读回，字段已按新结构收敛', async () => {
 
 /* ───────────────────── 审查模式：卡片与放行 ───────────────────── */
 test('审查模式收敛进状态，出厂默认必须是自动', () => {
-  assert.equal(DEFAULTS.mode, 'auto', '默认自动 = 老行为，不能让升级改变现有手感')
+  assert.equal(DEFAULTS.mode, 'auto', '默认必须落在自动那一档，不能让一次升级改变现有手感')
   assert.equal(sanitizeState({ mode: 'review' }).mode, 'review')
   assert.equal(sanitizeState({ mode: ' REVIEW ' }).mode, 'review')
   assert.equal(sanitizeState({ mode: '审查' }).mode, 'auto', '认不出的值回落到默认，不是报错')
@@ -782,6 +790,14 @@ test('审查模式收敛进状态，出厂默认必须是自动', () => {
 test('publicState 带上审查模式，浏览器半边才知道该不该拦', () => {
   assert.equal(publicState(sanitizeState({ mode: 'review' })).mode, 'review')
   assert.equal(publicState(sanitizeState({})).mode, 'auto')
+})
+
+test('改写判断的开关：默认关、能开、坏值回落，并下发给浏览器半边', () => {
+  assert.equal(DEFAULTS.noContentSkip, false, '出厂必须关闭：默认开启会改变所有现有用户的手感')
+  assert.equal(sanitizeState({}).noContentSkip, false, '老配置里没有这个字段 ⇒ 就是关')
+  assert.equal(sanitizeState({ noContentSkip: true }).noContentSkip, true)
+  assert.equal(sanitizeState({ noContentSkip: 'yes' }).noContentSkip, false, '只认布尔，不接受真值字符串')
+  assert.equal(publicState(sanitizeState({ noContentSkip: true })).noContentSkip, true)
 })
 
 test('审查路由：改写一遍并回传候选，路由来自宿主的默认模型服务', async () => {
@@ -1023,6 +1039,104 @@ test('审查路由上的触发前缀：回给卡片的是剥掉暗号那份，!!
   assert.equal(answer.body.changed, true, '!! 在审查路由上同样要绕过"已经很硬"的跳过')
   assert.equal(answer.body.intensity, 'light')
   assert.equal(forceLlm.calls[0].messages[0].content[0].text, hardman, '暗号不许进模型')
+})
+
+/* ──────────────────────── 改写判断（默认关闭） ──────────────────────── */
+
+test('改写判断默认关闭：短消息照旧烧一次模型调用', async () => {
+  const llm = makeLlm(['老哥们，继续搞！'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard' })
+
+  const result = await runPreStep(listeners, message([{ type: 'text', text: '继续' }]))
+  assert.equal(result.messages[0].content[0].text, '老哥们，继续搞！')
+  assert.equal(llm.calls.length, 1)
+})
+
+test('打开之后：没有内容的消息不调模型，一个字节都不动', async () => {
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard', noContentSkip: true })
+
+  for (const text of ['继续', '好的', '？？', '1.']) {
+    const msg = message([{ type: 'text', text }])
+    const result = await runPreStep(listeners, msg)
+    assert.equal(result.messages[0], msg, `应当原样返回同一条消息：${text}`)
+  }
+  assert.equal(llm.calls.length, 0)
+
+  await wait(30)
+  const stats = JSON.parse(await readFile(stateFile(), 'utf8')).stats
+  assert.equal(stats.lastSkip, 'no-content')
+  assert.equal(stats.lastGate, 'pure-symbol', '判据命中的理由要留下（这批最后一条是 `1.`）')
+  assert.equal(stats.rewrites || 0, 0, '没改写就不算一次改写')
+})
+
+test('`!!` 压过改写判断：强制改写照样调模型，前缀照样剥掉', async () => {
+  const llm = makeLlm(['老哥们，继续搞！'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard', noContentSkip: true })
+
+  const result = await runPreStep(listeners, message([{ type: 'text', text: '!! 继续' }]))
+  assert.equal(result.messages[0].content[0].text, '老哥们，继续搞！')
+  assert.equal(llm.calls.length, 1)
+  assert.equal(llm.calls[0].messages[0].content[0].text, '继续', '送给模型的是剥掉前缀的正文')
+})
+
+test('`??` 仍然最先：跳过前缀比改写判断更优先', async () => {
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard', noContentSkip: true })
+
+  const result = await runPreStep(listeners, message([{ type: 'text', text: '?? 继续' }]))
+  assert.equal(result.messages[0].content[0].text, '继续')
+  assert.equal(llm.calls.length, 0)
+})
+
+test('被判掉的消息不占这一轮唯一的那次模型调用', async () => {
+  // 一个步骤里只打一次模型调用（见 pre-step）。判据必须在那次调用**之前**生效，
+  // 否则一条"继续"就能把它后面的真需求挤成规则兜底。
+  const llm = makeLlm(['改写结果'])
+  const { ctx, listeners } = makeCtx(llm)
+  await boot(ctx, { enabled: true, intensity: 'standard', noContentSkip: true })
+
+  const skipped = message([{ type: 'text', text: '继续' }])
+  const real = message([{ type: 'text', text: '帮我写个脚本' }], { id: 'msg-2' })
+  const result = await runPreStepAll(listeners, [skipped, real])
+
+  assert.equal(result.messages[0], skipped, '判掉的那条原样放回')
+  assert.equal(result.messages[1].content[0].text, '改写结果', '同批里下一条照常改写')
+  assert.equal(llm.calls.length, 1)
+})
+
+test('审查路由：判据命中时回 `gated`，既不当"没东西可审"也不调模型', async () => {
+  const llm = makeLlm(['不该被调用'])
+  const { ctx, routes } = makeCtx(llm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(ctx, { enabled: true, intensity: 'standard', mode: 'review', noContentSkip: true })
+
+  const answer = await callRoute(routes, mod.REVIEW_ROUTE, { method: 'POST', body: { text: '继续' } })
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.gated, 'no-content')
+  assert.equal(answer.body.changed, false)
+  // 回 `skipped` 的话，浏览器半边会把它当成"没东西可审"直接发出去 —— 卡片就不见了。
+  assert.equal(answer.body.skipped, undefined, '这一条不是 skipped：它要留在卡片上')
+  assert.equal(llm.calls.length, 0)
+})
+
+test('审查路由：`force` 明确要求调一次模型，压过判据', async () => {
+  const llm = makeLlm(['老哥们，继续搞！'])
+  const { ctx, routes } = makeCtx(llm, { services: { agentDefaultModel: DEFAULT_MODEL_SERVICE } })
+  await boot(ctx, { enabled: true, intensity: 'standard', mode: 'review', noContentSkip: true })
+
+  const answer = await callRoute(routes, mod.REVIEW_ROUTE, {
+    method: 'POST',
+    body: { text: '继续', force: true },
+  })
+  assert.equal(answer.body.changed, true)
+  assert.equal(answer.body.text, '老哥们，继续搞！')
+  assert.equal(answer.body.gated, undefined)
+  assert.equal(llm.calls.length, 1)
+  assert.equal(llm.calls[0].messages[0].content[0].text, '继续')
 })
 
 test('模型失败时留下 lastIssue，浏览器半边据此弹一次提示', async () => {

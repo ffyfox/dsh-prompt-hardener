@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { INTENSITIES, assembleFallback, normalizeIntensity } from './lib/fallback.js'
+import { noContent } from './lib/gate.js'
 import { looksHardman } from './lib/phrases.js'
 import { parseTrigger } from './lib/triggers.js'
 
@@ -85,7 +86,7 @@ const MAX_BODY_BYTES = 64 * 1024
 
 /**
  * 审查模式。这两档只影响**浏览器半边**怎么发消息：
- * - `auto`：老行为 —— 点了发送就发出去，改写发生在宿主 `agent/pre-step` 里，发完改不了。
+ * - `auto`：点了发送就发出去，改写发生在宿主 `agent/pre-step` 里，发完改不了。
  * - `review`：点了发送先被浏览器半边拦下，弹一张卡片让人过一眼、改一改，确认了才真发。
  *
  * 宿主这边只多做一件事：认下"用户确认过的定稿"，别在 pre-step 里把它再改写一遍。
@@ -97,6 +98,11 @@ const DEFAULTS = Object.freeze({
   enabled: true,
   intensity: 'standard',
   mode: 'auto',
+  /**
+   * 改写判断：开启后，整条消息没有内容词时不调用模型，按原话发出去。
+   * **默认关闭** —— 关着时这个判据完全不存在，行为与它出现之前一模一样。
+   */
+  noContentSkip: false,
   llm: Object.freeze({
     provider: '',
     model: '',
@@ -356,6 +362,7 @@ export function sanitizeState(raw, defaults = DEFAULTS) {
     enabled: legacyOff ? false : bool(source.enabled, defaults.enabled),
     intensity: normalizeIntensity(legacyOff ? undefined : (source.intensity ?? defaults.intensity)),
     mode: normalizeMode(source.mode, defaults.mode),
+    noContentSkip: bool(source.noContentSkip, defaults.noContentSkip),
     llm: {
       provider: typeof llmRaw.provider === 'string' ? llmRaw.provider : defaults.llm.provider,
       model: typeof llmRaw.model === 'string' ? llmRaw.model : defaults.llm.model,
@@ -677,17 +684,23 @@ async function rewriteText(ctx, agent, text, options) {
  * 1. 先剥前缀 —— 后面所有判断、连同比对放行登记，用的都是**剥掉之后**的正文。
  * 2. `??` 直接跳过，连 `!!` 都压不过它（同一条消息上两个前缀不会同时命中，见 triggers.js）。
  *
+ * 改写判断（`gate`）也在这里出结论，理由同上：pre-step 与审查卡片必须得出同一个答案。
+ * 两个前缀都能压过它 —— `??` 是"别改"的明确命令，`!!` 是"照改"的明确命令，
+ * 都比"这条看着没内容"更具体。开关关着时它恒为 null。
+ *
  * @param {string} text 用户原话（**还没剥前缀**）。
  * @param {object} current 当前状态。
  * @returns {{ body: string, trigger: string|null, skip: boolean, force: boolean,
- *   intensity: string, stripped: boolean }}
- *   `intensity` 是这一条实际要用的档位（就是插件当前那一档）。
+ *   intensity: string, stripped: boolean, gate: 'pure-symbol'|'vocab'|null }}
+ *   `intensity` 是这一条实际要用的档位（就是插件当前那一档）；
+ *   `gate` 非 null 表示这一条没有可改写的内容，按原话发出、不调用模型。
  */
 function planForText(text, current) {
   const parsed = parseTrigger(text)
   const stripped = parsed.trigger !== null
   const body = stripped ? parsed.text : text
   const intensity = normalizeIntensity(current.intensity)
+  const gate = !parsed.skip && !parsed.force && current.noContentSkip === true ? noContent(body) : null
 
   return {
     body,
@@ -696,6 +709,7 @@ function planForText(text, current) {
     force: parsed.force,
     intensity,
     stripped,
+    gate,
   }
 }
 
@@ -756,6 +770,7 @@ export function publicState(state) {
     enabled: state.enabled,
     intensity: state.intensity,
     mode: state.mode,
+    noContentSkip: state.noContentSkip,
     llm: { ...state.llm },
     stats: { ...state.stats },
     revision: state.revision,
@@ -1063,6 +1078,18 @@ export function apply(ctx, config) {
           emit(plan.stripped ? plan.body : undefined)
           continue
         }
+        if (plan.gate) {
+          // 改写判断命中：这条消息没有可改写的内容。跳过它省下一次模型调用和那几秒等待，
+          // 按原话发出去，信息量一点不少。
+          //
+          // 位置在下面 `usedLlm` 置位**之前**：判掉的消息不占这一轮唯一的那次模型调用，
+          // 同一批里的下一条照样能被改写。
+          stat.skipped = Number(stat.skipped || 0) + 1
+          stat.lastSkip = 'no-content'
+          stat.lastGate = plan.gate
+          emit(plan.stripped ? plan.body : undefined)
+          continue
+        }
 
         // 一个步骤里最多只打一次模型调用，避免成批入队时把延迟和账单翻倍。
         // 注意 `usedLlm` 在**调用前**就置位：第一次失败之后剩下的消息直接走规则兜底，
@@ -1270,8 +1297,14 @@ export function apply(ctx, config) {
 
           // 和 pre-step 共用同一条判定：卡片上看到的必须是"不审查直接发出去"会得到的那个东西。
           const plan = planForText(text, current)
-          /** 跳过时回给卡片的是**剥掉前缀那份**，它会原样发出去（见 client 的 release）。 */
-          const skip = (reason) => {
+          // 卡片上的「强制改写」：明确要调一次模型，压过改写判断与"本来就够硬"。
+          // 它**不走 `!!` 前缀那条路** —— 那会在卡片里凭空多出用户没打过的符号。
+          if (body && body.force === true) {
+            plan.force = true
+            plan.gate = null
+          }
+          /** 记一笔"这一条没调模型"及其理由，`extra` 用来补判据细节。 */
+          const markSkip = (reason, extra) => {
             state = {
               ...state,
               stats: {
@@ -1279,9 +1312,14 @@ export function apply(ctx, config) {
                 ...patch,
                 lastSkip: reason,
                 ...(plan.trigger ? { lastTrigger: plan.trigger } : {}),
+                ...(extra || {}),
               },
             }
             void persist()
+          }
+          /** 跳过时回给卡片的是**剥掉前缀那份**，它会原样发出去（见 client 的 release）。 */
+          const skip = (reason) => {
+            markSkip(reason)
             send(200, { ok: true, skipped: reason, changed: false, text: plan.body, source: null })
           }
 
@@ -1291,6 +1329,14 @@ export function apply(ctx, config) {
           }
           if (!plan.force && looksHardman(plan.body)) {
             skip('already-hardman')
+            return
+          }
+          if (plan.gate) {
+            markSkip('no-content', { lastGate: plan.gate })
+            // **故意不回 `skipped`**：客户端把 `skipped` 当成"没东西可审，直接发出去"，
+            // 而这一条要留在卡片上 —— 用户可以在那里「强制改写」。
+            // 也不回 `text`：`gate` 与"剥过前缀"不会同时成立，正文与草稿逐字相同。
+            send(200, { ok: true, gated: 'no-content', changed: false, source: null })
             return
           }
 

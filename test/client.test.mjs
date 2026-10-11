@@ -72,6 +72,10 @@ globalThis.window = {
       registered = module
     },
   },
+  // 卡片的两处延时（露面、请求超时）走 `window.setTimeout`。浏览器里它当然在，
+  // 桩里也得在：否则"按下按钮到底做了什么"这条路一步都走不动。
+  setTimeout: (...args) => globalThis.setTimeout(...args),
+  clearTimeout: (...args) => globalThis.clearTimeout(...args),
 }
 globalThis.fetch = async () => {
   throw new Error('offline test')
@@ -389,7 +393,7 @@ test('判据：发送键靠 aria-label 认出来，跟它在不在最后一位�
 test('审查相关的文案中英双语都得在', () => {
   const dict = registered.factory(() => ReactStub).__internals.DICT
   for (const lang of ['zh', 'en']) {
-    for (const key of ['mode', 'auto', 'review', 'reviewTitle', 'rewriting', 'send', 'sendOriginal', 'cancel', 'retry', 'failed', 'toastTimeout', 'toastNoRoute', 'toastFailed', 'toastDismiss']) {
+    for (const key of ['mode', 'auto', 'review', 'reviewTitle', 'rewriting', 'send', 'sendOriginal', 'cancel', 'retry', 'failed', 'toastTimeout', 'toastNoRoute', 'toastFailed', 'toastDismiss', 'noContentSkip', 'noContentSkipHint', 'on', 'notRewritten', 'notRewrittenHint', 'force']) {
       assert.equal(typeof dict[lang][key], 'string', `${lang} 缺文案：${key}`)
     }
   }
@@ -678,6 +682,9 @@ test('审查卡片：改写中时正文禁用，但"按原文发出"必须还开
   const tree = entry.Component({ sessionId: 's-working', inputActions: { submit() {}, setDraft() {} } })
   const texts = textsOf(tree).join(' | ')
   assert.ok(texts.includes('改写中'), `改写中标记不在：${texts}`)
+  // 加粗只属于「未改写」那枚结论徽标；过程播报（改写中 / 发出中 / 规则兜底）保持原样。
+  const badge = findNode(tree, (node) => node.props && node.props.className === 'ph-badge')
+  assert.equal(badge.props['data-strong'], 'false', '过程播报的徽标不该加粗')
 
   const edit = findNode(tree, (node) => node.props && node.props.className === 'ph-edit')
   assert.equal(edit.props.disabled, true, '改写中正文先别让人改（结果还没回来，改了也会被覆盖）')
@@ -686,6 +693,132 @@ test('审查卡片：改写中时正文禁用，但"按原文发出"必须还开
   assert.ok(original, '找不到"按原文发出"')
   assert.equal(original.props.disabled, undefined, '这条逃生口在改写中也不许禁用')
   module.__internals.holdBag().byId = {}
+})
+
+/* ─────────────────── 改写判断：开关与"未改写"的卡片 ─────────────────── */
+
+/**
+ * 装好客户端、渲染一次输入框控件。
+ * @param {object} module 客户端产物（`registered.factory(...)`）。
+ * @param {string} sessionId 会话号。
+ * @param {object} [options] `{ hold, open }`：预置的审查态、是否强制展开面板。
+ * @returns {{ tree: object, texts: string }}
+ */
+function renderControl(module, sessionId, options = {}) {
+  let entry = null
+  let dict = null
+  const ctx = {
+    effect(fn) {
+      const dispose = fn()
+      return () => {
+        if (typeof dispose === 'function') dispose()
+      }
+    },
+    locale: {
+      register: (_ns, value) => {
+        dict = value
+        return () => {}
+      },
+      bind: () => (key) => (dict && dict.zh && typeof dict.zh[key] === 'string' ? dict.zh[key] : key),
+    },
+    slots: {
+      inject: (_owner, cb) => cb(),
+      register: (options_, Component) => {
+        if (options_.name === 'conversation.input.left') entry = { options: options_, Component }
+        return () => {}
+      },
+    },
+  }
+  module.apply(ctx)
+  const bag = module.__internals.holdBag()
+  bag.byId = {}
+  if (options.hold) module.__internals.writeHold(sessionId, options.hold)
+  ReactStub.__forceOpenOnce = options.open === true
+  const tree = entry.Component({ sessionId, inputActions: { submit() {}, setDraft() {} } })
+  return { tree, texts: textsOf(tree).join(' | ') }
+}
+
+test('面板多一行「改写判断」：出厂是关，两个选项都带悬停说明', () => {
+  const module = registered.factory(() => ReactStub)
+  const { tree, texts } = renderControl(module, 's-smart', { open: true })
+  assert.ok(texts.includes('改写判断'), `面板里没有这一行：${texts}`)
+
+  // 这一行的两个按钮靠悬停文案认出来 —— 档位与发送那两行的 title 是别的字样。
+  const buttons = []
+  const collect = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      node.forEach(collect)
+      return
+    }
+    const props = node.props || {}
+    if (props.className === 'ph-segbtn' && typeof props.title === 'string' && props.title.includes('不再调用模型')) {
+      buttons.push(node)
+    }
+    for (const child of node.children || []) collect(child)
+  }
+  collect(tree)
+  assert.deepEqual(buttons.map((node) => textsOf(node).join('')), ['开', '关'], '两个选项的字必须是开 / 关')
+  assert.deepEqual(buttons.map((node) => node.props['data-on']), ['false', 'true'], '出厂必须是关')
+  assert.ok(
+    buttons[0].props.title.includes('开启后，无内容的消息（如「继续」「好的」「？」）不再调用模型改写'),
+    `悬停说明不对：${buttons[0].props.title}`,
+  )
+  module.__internals.holdBag().byId = {}
+})
+
+test('「未改写」的卡片：徽标与悬停说明、三个出口，且不给"按原文发出"', () => {
+  const module = registered.factory(() => ReactStub)
+  const { tree, texts } = renderControl(module, 's-gated', {
+    hold: { id: 9001, phase: 'gated', original: '继续', text: '继续', source: null, error: '' },
+  })
+
+  assert.ok(texts.includes('未改写'), `卡片的徽标不对：${texts}`)
+  const badge = findNode(tree, (node) => node.props && node.props.className === 'ph-badge')
+  assert.equal(badge.props.title, '本条按照规则没有调用模型改写，可强制改写', '悬停要说清为什么没改、还能怎么改')
+  // 「未改写」是结论，不是过程播报：它必须用主字色加粗，否则人会下意识等几秒才发现没在改。
+  assert.equal(badge.props['data-strong'], 'true', '未改写的徽标必须带加粗标记')
+  const strong = module.__internals.CSS.match(/\.ph-badge\[data-strong="true"\] \{[^}]*\}/)
+  assert.ok(strong, '徽标的加粗样式丢了')
+  assert.match(strong[0], /font-weight: 600/, '徽标必须加粗')
+  assert.match(strong[0], /color: var\(--dsw-alias-label-primary\)/, '徽标必须用主字色（两级浅灰都不够）')
+
+  for (const label of ['撤回', '强制改写', '发出']) {
+    assert.ok(texts.includes(label), `出口缺失：${label}`)
+  }
+  // 这一条本来就是原话，再给一个"按原文发出"只是重复。
+  assert.ok(!texts.includes('按原文发出'), '"未改写"的卡上不该有"按原文发出"')
+
+  const edit = findNode(tree, (node) => node.props && node.props.className === 'ph-edit')
+  assert.equal(edit.props.value, '继续', '正文就是用户打的那份')
+  assert.equal(edit.props.disabled, false, '没在等模型，正文立刻可编辑')
+  module.__internals.holdBag().byId = {}
+})
+
+test('「强制改写」按下去：明确要求宿主调模型，而且不让卡片让位', async () => {
+  const module = registered.factory(() => ReactStub)
+  const { tree } = renderControl(module, 's-force', {
+    hold: { id: 9002, phase: 'gated', original: '？？', text: '？？', source: null, error: '' },
+  })
+
+  const button = findNode(tree, (node) => node.children && node.children.includes('强制改写'))
+  assert.ok(button, '找不到「强制改写」')
+  button.props.onClick()
+
+  const hold = module.__internals.readHold('s-force')
+  assert.equal(hold.phase, 'working')
+  assert.equal(hold.force, true, '没有这个标记，宿主又会把它判成"没内容"')
+  assert.equal(hold.hidden, false, '按在已经露面的卡片上，不该先收起来再出现')
+  // 离线：请求注定失败，卡片会落到失败态 —— 让它跑完再清袋子，别把异步写带进下一条用例。
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  module.__internals.holdBag().byId = {}
+})
+
+test('审查请求体：只有「强制改写」那一趟才带 force 标记', () => {
+  const { reviewBody } = registered.factory(() => ReactStub).__internals
+  assert.equal(reviewBody('继续', true), '{"text":"继续","force":true}')
+  assert.equal(reviewBody('继续'), '{"text":"继续"}')
+  assert.equal(reviewBody('继续', false), '{"text":"继续"}', '只有明确的 true 才算强制')
 })
 
 test('药丸只留名字：档位靠颜色和力量条标识', () => {
